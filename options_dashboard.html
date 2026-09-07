@@ -1,0 +1,742 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>台指選擇權 貴賤判斷</title>
+<style>
+  :root {
+    --bg-page: #0A0E14;
+    --bg-card: #11151D;
+    --bg-chip: #171C26;
+    --border: #232838;
+    --border-strong: #333A4D;
+    --text-primary: #E5E9F0;
+    --text-secondary: #8A93A6;
+    --text-muted: #5C6478;
+    --accent: #F0B429;
+    --accent-dim: #7A5E14;
+    --red: #FF5C5C;
+    --red-bg: #2A1416;
+    --green: #34D399;
+    --green-bg: #10241C;
+    --font-sans: -apple-system, "Segoe UI", "PingFang TC", "Microsoft JhengHei", sans-serif;
+    --font-mono: "JetBrains Mono", "SF Mono", Consolas, monospace;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0 auto;
+    background: var(--bg-page);
+    color: var(--text-primary);
+    font-family: var(--font-sans);
+    padding: 20px;
+    max-width: 720px;
+  }
+
+  /* ---- 頂部台指期即時點數 ---- */
+  .ticker {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 14px 18px;
+    margin-bottom: 16px;
+  }
+  .ticker-label {
+    font-size: 12px;
+    color: var(--text-secondary);
+    letter-spacing: 0.5px;
+  }
+  .ticker-price {
+    font-family: var(--font-mono);
+    font-size: 26px;
+    font-weight: 700;
+    margin-top: 2px;
+  }
+  .ticker-change { font-size: 14px; font-family: var(--font-mono); margin-left: 8px; }
+  .up { color: var(--red); }
+  .down { color: var(--green); }
+  .ticker-updated {
+    font-size: 11px;
+    color: var(--text-muted);
+    text-align: right;
+  }
+  .ticker-updated .dot {
+    display: inline-block; width: 6px; height: 6px; border-radius: 50%;
+    background: var(--green); margin-right: 5px;
+    animation: pulse 2s infinite;
+  }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.3; } }
+
+  /* ---- 月選/週選切換 ---- */
+  .segment {
+    display: flex;
+    background: var(--bg-chip);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 3px;
+    margin-bottom: 10px;
+    width: fit-content;
+  }
+  .segment button {
+    border: none;
+    background: transparent;
+    color: var(--text-secondary);
+    font-size: 13px;
+    font-weight: 500;
+    padding: 7px 18px;
+    border-radius: 8px;
+    cursor: pointer;
+    font-family: var(--font-sans);
+  }
+  .segment button.active {
+    background: var(--border-strong);
+    color: var(--text-primary);
+  }
+
+  /* ---- 到期日期選單 ---- */
+  .expiry-list {
+    display: flex;
+    gap: 8px;
+    overflow-x: auto;
+    padding-bottom: 4px;
+    margin-bottom: 16px;
+  }
+  .expiry-chip {
+    flex: 0 0 auto;
+    background: var(--bg-chip);
+    border: 1px solid var(--border);
+    color: var(--text-secondary);
+    font-size: 13px;
+    padding: 8px 14px;
+    border-radius: 8px;
+    cursor: pointer;
+    white-space: nowrap;
+    font-family: var(--font-sans);
+  }
+  .expiry-chip.active {
+    border-color: var(--accent);
+    color: var(--accent);
+    background: rgba(240, 180, 41, 0.08);
+  }
+  /* 週別標籤：W=週三結算、F=週五結算。兩組會交錯掛牌，用顏色分開才不會選錯 */
+  .wk-tag {
+    display: inline-block;
+    margin-right: 6px;
+    padding: 1px 5px;
+    border-radius: 4px;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    font-weight: 600;
+  }
+  .wk-tag.wed { background: rgba(90, 160, 255, 0.16); color: #7FB0FF; }
+  .wk-tag.fri { background: rgba(176, 140, 255, 0.16); color: #B08CFF; }
+  .wk-tag.other { background: var(--bg-chip); color: var(--text-muted); }
+
+  /* ---- 選擇權鏈表格 ---- */
+  .chain-card {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    overflow: hidden;
+  }
+  .chain-header {
+    display: grid;
+    grid-template-columns: 1fr 1fr 76px 1fr 1fr;
+    padding: 10px 12px;
+    font-size: 11px;
+    color: var(--text-muted);
+    border-bottom: 1px solid var(--border);
+  }
+  .chain-header .call-label { text-align: right; padding-right: 8px; color: var(--text-secondary); font-weight: 600; }
+  .chain-header .put-label { text-align: left; padding-left: 8px; color: var(--text-secondary); font-weight: 600; }
+  .chain-header .strike-label { text-align: center; }
+
+  .chain-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr 76px 1fr 1fr;
+    align-items: center;
+    padding: 9px 12px;
+    border-bottom: 1px solid var(--border);
+    font-family: var(--font-mono);
+    font-size: 13px;
+  }
+  .chain-row:last-child { border-bottom: none; }
+  .chain-row.atm {
+    background: rgba(240, 180, 41, 0.06);
+    box-shadow: inset 0 1px 0 var(--accent-dim), inset 0 -1px 0 var(--accent-dim);
+  }
+
+  .cell-fair { font-size: 10px; color: var(--text-muted); }
+  .call-fair { text-align: right; }
+  .put-fair { text-align: left; }
+
+  .cell-status { display: flex; align-items: center; gap: 6px; }
+  .call-status { justify-content: flex-end; }
+  .put-status { justify-content: flex-start; }
+
+  .badge {
+    font-size: 10px;
+    font-family: var(--font-sans);
+    font-weight: 600;
+    padding: 2px 6px;
+    border-radius: 4px;
+  }
+  .badge.expensive { background: var(--red-bg); color: var(--red); }
+  .badge.cheap { background: var(--green-bg); color: var(--green); }
+  /* 偏差百分比失去意義的合約(深價外/基準是外插來的)，標記但不要當成可用訊號 */
+  .badge.unreliable { opacity: 0.45; }
+
+  .price { font-weight: 600; }
+  .price.expensive { color: var(--red); }
+  .price.cheap { color: var(--green); }
+  .price.fair { color: var(--text-primary); }
+  .price.na { color: var(--text-muted); font-weight: 400; }
+  /* 報價超過10分鐘：那個價格可能是幾小時前成交的，淡化提醒 */
+  .price.stale { opacity: 0.5; }
+
+  .strike {
+    text-align: center;
+    font-weight: 700;
+    color: var(--text-secondary);
+  }
+  .chain-row.atm .strike { color: var(--accent); }
+
+  .legend {
+    display: flex;
+    gap: 16px;
+    margin-top: 12px;
+    font-size: 11px;
+    color: var(--text-muted);
+    align-items: center;
+  }
+  .legend span { display: flex; align-items: center; gap: 5px; }
+  .legend .sw { width: 8px; height: 8px; border-radius: 2px; }
+
+  .loading-note {
+    text-align: center;
+    font-size: 12px;
+    color: var(--text-muted);
+    padding: 24px 0;
+  }
+
+  /* ---- 底下的資料來源說明 / 錯誤訊息 ---- */
+  .meta {
+    margin-top: 14px;
+    font-size: 11px;
+    line-height: 1.7;
+    color: var(--text-muted);
+  }
+  .meta b { color: var(--text-secondary); font-weight: 600; }
+  .meta .warn { color: var(--accent); }
+
+  .error-note {
+    display: none;
+    margin-top: 12px;
+    padding: 10px 12px;
+    border-radius: 8px;
+    border: 1px solid var(--red);
+    background: var(--red-bg);
+    color: var(--red);
+    font-size: 12px;
+  }
+  .error-note.show { display: block; }
+</style>
+</head>
+<body>
+
+  <div class="ticker">
+    <div>
+      <div class="ticker-label">台指期 TX</div>
+      <div>
+        <span class="ticker-price" id="underlyingPrice">--</span>
+        <span class="ticker-change" id="underlyingChange"></span>
+      </div>
+    </div>
+    <div class="ticker-updated">
+      <span class="dot"></span><span id="lastUpdated">--</span>
+    </div>
+  </div>
+
+  <div class="segment" id="expiryTypeSegment">
+    <button data-type="month" class="active">月選</button>
+    <button data-type="week">週選</button>
+  </div>
+
+  <div class="expiry-list" id="expiryList"></div>
+
+  <div class="chain-card">
+    <div class="chain-header">
+      <div class="call-label">Call 合理價</div>
+      <div class="call-label">Call 市場價</div>
+      <div class="strike-label">履約價</div>
+      <div class="put-label">Put 市場價</div>
+      <div class="put-label">Put 合理價</div>
+    </div>
+    <div id="chainBody">
+      <div class="loading-note">載入中…</div>
+    </div>
+  </div>
+
+  <div class="legend">
+    <span><span class="sw" style="background:var(--red)"></span>偏貴</span>
+    <span><span class="sw" style="background:var(--green)"></span>便宜</span>
+    <span><span class="sw" style="background:var(--text-primary)"></span>合理</span>
+    <span style="margin-left:auto">每 60 秒自動更新</span>
+  </div>
+
+  <div class="error-note" id="errorNote"></div>
+  <div class="meta" id="metaNote"></div>
+
+<script>
+/* =====================================================================
+   資料層 — 目前用模擬資料，之後接真實後端時只需要改這一區塊
+   =====================================================================
+
+   要接上真的後端時，把 fetchExpiryList() 跟 fetchChainData() 兩個函式
+   內部實作換成真的 fetch()，回傳格式維持一樣的結構即可，下面畫面渲染的
+   程式碼完全不用動。
+
+   預期後端回傳格式（跟 option_live_quote 資料表對應）：
+   fetchChainData(expiryType, expiryId) 應回傳：
+   {
+     underlying: { price: 17486, prevClose: 17474, updatedAt: "14:23:05" },
+     rows: [
+       { strike: 17000,
+         call: { price: 605.0, status: "fair"|"expensive"|"cheap", fairPrice: 590.0 },
+         put:  { price: 8.5,   status: "fair", fairPrice: 8.5 } },
+       ...
+     ]
+   }
+   ===================================================================== */
+
+const USE_MOCK_DATA = false; // 已接上真的後端API
+
+async function getJson(url, what) {
+  let res;
+  try {
+    res = await fetch(url);
+  } catch (e) {
+    throw new Error("連不上後端(serve_dashboard.py 還在跑嗎?)");
+  }
+  const body = await res.json().catch(() => null);
+  if (!res.ok) {
+    // 後端的錯誤訊息都是 {"error": "..."}，直接拿來顯示比「抓資料失敗」有用得多
+    throw new Error((body && body.error) || `${what}失敗 (HTTP ${res.status})`);
+  }
+  return body;
+}
+
+async function fetchExpiryList(expiryType) {
+  if (USE_MOCK_DATA) return mockExpiryList(expiryType);
+  return await getJson(`/api/expiries?type=${expiryType}`, "抓到期日清單");
+}
+
+async function fetchChainData(expiryType, expiryId) {
+  if (USE_MOCK_DATA) return mockChainData(expiryType, expiryId);
+  const q = expiryId ? `&expiry=${encodeURIComponent(expiryId)}` : "";
+  return await getJson(`/api/quotes?type=${expiryType}${q}`, "抓報價資料");
+}
+
+/* ---- 以下都是模擬資料產生器，之後接真後端可以整段刪除 ---- */
+
+function mockExpiryList(expiryType) {
+  if (expiryType === "month") {
+    return [
+      { id: "202609", label: "9月 (09/16 週三)", weekCode: null },
+      { id: "202610", label: "10月 (10/21 週三)", weekCode: null },
+      { id: "202611", label: "11月 (11/18 週三)", weekCode: null },
+    ];
+  }
+  // 週選W(週三)跟F(週五)是交錯掛牌的，mock也照這個順序，不然看不出真實排版
+  return [
+    { id: "202609W1", label: "09/02 週三 (5天)", weekCode: "W1" },
+    { id: "202609F1", label: "09/04 週五 (7天)", weekCode: "F1" },
+    { id: "202609W2", label: "09/09 週三 (12天)", weekCode: "W2" },
+    { id: "202609F2", label: "09/11 週五 (14天)", weekCode: "F2" },
+  ];
+}
+
+function blackScholesLike(F, K, T, sigma) {
+  // 簡化版理論價估算，僅供前端demo顯示用，正式合理價由後端算好傳過來
+  const d1 = (Math.log(F / K) + 0.5 * sigma * sigma * T) / (sigma * Math.sqrt(T));
+  const d2 = d1 - sigma * Math.sqrt(T);
+  const N = (x) => (1 + erf(x / Math.SQRT2)) / 2;
+  const call = F * N(d1) - K * N(d2);
+  const put = K * N(-d2) - F * N(-d1);
+  return { call: Math.max(call, 0.1), put: Math.max(put, 0.1) };
+}
+function erf(x) {
+  const a1=0.254829592,a2=-0.284496736,a3=1.421413741,a4=-1.453152027,a5=1.061405429,p=0.3275911;
+  const sign = x < 0 ? -1 : 1; x = Math.abs(x);
+  const t = 1 / (1 + p * x);
+  const y = 1 - (((((a5*t+a4)*t)+a3)*t+a2)*t+a1)*t*Math.exp(-x*x);
+  return sign * y;
+}
+
+let mockUnderlying = 17486;
+
+function mockChainData(expiryType, expiryId) {
+  mockUnderlying = Math.round(mockUnderlying + (Math.random() - 0.5) * 20);
+  const F = mockUnderlying;
+  const atmStrike = Math.round(F / 100) * 100;
+  const T = expiryType === "week" ? 5 / 365 : 25 / 365;
+  const sigma = 0.15;
+
+  const rows = [];
+  for (let i = -6; i <= 6; i++) {
+    const strike = atmStrike + i * 100;
+    const theo = blackScholesLike(F, strike, T, sigma);
+
+    const makeSide = (fairBase) => {
+      const bias = Math.random() < 0.25
+        ? (Math.random() < 0.5 ? 1 : -1) * (0.06 + Math.random() * 0.06)
+        : (Math.random() - 0.5) * 0.03;
+      const price = Math.max(fairBase * (1 + bias), 0.1);
+      const dev = (price - fairBase) / fairBase;
+      const status = dev > 0.05 ? "expensive" : dev < -0.05 ? "cheap" : "fair";
+      return { price: round1(price), status, fairPrice: round1(fairBase) };
+    };
+
+    rows.push({
+      strike,
+      call: makeSide(theo.call),
+      put: makeSide(theo.put),
+    });
+  }
+
+  return {
+    underlying: {
+      price: F,
+      prevClose: 17474,
+      updatedAt: new Date().toLocaleTimeString("zh-TW", { hour12: false }),
+    },
+    rows,
+  };
+}
+function round1(n) { return Math.round(n * 10) / 10; }
+
+/* =====================================================================
+   畫面渲染層 — 接真後端時這區不用改
+   ===================================================================== */
+
+const STORAGE_KEY = "txo_dashboard_selection";
+
+function saveSelection() {
+  localStorage.setItem(STORAGE_KEY, JSON.stringify({
+    expiryType: currentExpiryType,
+    expiryId: currentExpiryId,
+  }));
+}
+
+function loadSavedSelection() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch (e) {
+    return null; // localStorage被封鎖或資料損毀時，安靜地退回預設值
+  }
+}
+
+const saved = loadSavedSelection();
+let currentExpiryType = saved ? saved.expiryType : "month";
+let currentExpiryId = null;
+let expiryListLoadedAt = 0;   // 到期別清單上次抓成功的時間(見下面的 tick)
+
+// 讓月選/週選按鈕的active樣式也對齊restore後的狀態
+document.querySelectorAll("#expiryTypeSegment button").forEach((b) => {
+  b.classList.toggle("active", b.dataset.type === currentExpiryType);
+});
+
+async function loadExpiryList() {
+  const list = await fetchExpiryList(currentExpiryType);
+
+  // 每次都重新讀localStorage(而不是只用頁面載入當下那份)，
+  // 這樣同一次瀏覽期間來回切換月選/週選，也能各自記住上次選的到期日
+  const latestSaved = loadSavedSelection();
+  const savedStillValid = latestSaved && latestSaved.expiryType === currentExpiryType
+    && list.some((e) => e.id === latestSaved.expiryId);
+  currentExpiryId = savedStillValid ? latestSaved.expiryId : list[0].id;
+
+  const container = document.getElementById("expiryList");
+  container.innerHTML = "";
+  list.forEach((e) => {
+    const chip = document.createElement("div");
+    chip.className = "expiry-chip" + (e.id === currentExpiryId ? " active" : "");
+    chip.title = e.kindLabel ? `${e.id}　${e.kindLabel}` : e.id;
+    // 週選前面掛一個 W1/F1 標籤：W系列是週三結算、F系列是週五結算，
+    // 同一週兩個都掛牌，只看日期很容易選錯
+    if (e.weekCode) {
+      const tag = document.createElement("span");
+      const letter = e.weekCode.charAt(0);
+      tag.className = "wk-tag " + (letter === "W" ? "wed" : letter === "F" ? "fri" : "other");
+      tag.textContent = e.weekCode;
+      chip.appendChild(tag);
+    }
+    chip.appendChild(document.createTextNode(e.label));
+    chip.onclick = () => {
+      currentExpiryId = e.id;
+      document.querySelectorAll(".expiry-chip").forEach((c) => c.classList.remove("active"));
+      chip.classList.add("active");
+      saveSelection();
+      loadChainData();
+    };
+    container.appendChild(chip);
+  });
+  saveSelection();
+  expiryListLoadedAt = Date.now();
+}
+
+async function loadChainData() {
+  const scrollPos = window.scrollY; // 重畫表格前先記住目前捲到哪
+  try {
+    const data = await fetchChainData(currentExpiryType, currentExpiryId);
+    renderTicker(data.underlying);
+    renderChain(data);
+    renderMeta(data.meta);
+    showError(null);
+  } catch (e) {
+    // 非交易時段、網路斷線、期交所維護都會走到這裡。
+    // 保留畫面上「上一次成功抓到的資料」不要清掉，只在下面標示更新失敗。
+    showError(e.message || String(e));
+    // 失敗原因有可能是「currentExpiryId 指向的合約已經下市」(後端會回404)。
+    // 把時間戳歸零，下一次 tick 就會重抓到期別清單並重新挑一個，
+    // 不然畫面會一直卡在「找不到到期別 XXX」直到使用者自己按重新整理。
+    expiryListLoadedAt = 0;
+  }
+  window.scrollTo(0, scrollPos); // 重畫完馬上還原，使用者感覺不到跳動
+}
+
+function showError(msg) {
+  const el = document.getElementById("errorNote");
+  el.classList.toggle("show", Boolean(msg));
+  if (msg) {
+    const now = new Date().toLocaleTimeString("zh-TW", { hour12: false });
+    el.textContent = `${now} 更新失敗：${msg}（畫面上是上一次成功抓到的資料）`;
+  }
+}
+
+function renderTicker(u) {
+  document.getElementById("underlyingPrice").textContent = u.price.toLocaleString();
+  const change = u.price - u.prevClose;
+  const changeEl = document.getElementById("underlyingChange");
+  const sign = change >= 0 ? "▲" : "▼";
+  changeEl.textContent = `${sign} ${Math.abs(change).toFixed(0)}`;
+  changeEl.className = "ticker-change " + (change >= 0 ? "up" : "down");
+  document.getElementById("lastUpdated").textContent = "最後更新 " + u.updatedAt;
+}
+
+function statusBadge(status, unreliable) {
+  const cls = unreliable ? " unreliable" : "";
+  const mark = unreliable ? "?" : "";
+  if (status === "expensive") return `<span class="badge expensive${cls}">偏貴${mark}</span>`;
+  if (status === "cheap") return `<span class="badge cheap${cls}">便宜${mark}</span>`;
+  return "";
+}
+
+/* 每個履約價的DOM節點快取起來，之後刷新只更新內容、不砍掉重建，避免閃爍 */
+let rowElements = {};
+
+function createRow(strike) {
+  const el = document.createElement("div");
+  el.className = "chain-row";
+  el.dataset.strike = strike;
+  el.innerHTML = `
+    <div class="cell-fair call-fair" data-role="callFair"></div>
+    <div class="cell-status call-status">
+      <span data-role="callBadge"></span>
+      <span class="price" data-role="callPrice"></span>
+    </div>
+    <div class="strike">${strike}</div>
+    <div class="cell-status put-status">
+      <span class="price" data-role="putPrice"></span>
+      <span data-role="putBadge"></span>
+    </div>
+    <div class="cell-fair put-fair" data-role="putFair"></div>
+  `;
+  return el;
+}
+
+function formatAge(sec) {
+  if (sec === null || sec === undefined) return "-";
+  if (sec < 60) return `${sec}秒前`;
+  if (sec < 3600) return `${Math.floor(sec / 60)}分前`;
+  return `${(sec / 3600).toFixed(1)}小時前`;
+}
+
+/* 滑鼠移上去看得到判斷的依據，不然畫面只有「偏貴」兩個字，無從判斷可不可信 */
+function sideTooltip(side) {
+  const lines = [
+    `即時IV ${side.iv}　基準IV ${side.baselineIv}`,
+    `合理價 ${side.fairPrice}　偏差 ${side.deviationPct > 0 ? "+" : ""}${side.deviationPct}%`,
+    `成交量 ${side.volume}　報價 ${formatAge(side.ageSec)}` +
+      (side.priceSource === "mid" ? "(買賣中價，今日尚無成交)" : ""),
+  ];
+  if (side.stale) lines.push("⚠ 報價超過10分鐘，這期間台指期已經跑掉一段，IV參考價值低");
+  if (side.reliable === false) lines.push("⚠ 偏差百分比在這一檔失去意義，不要當訊號看");
+  return lines.join("\n");
+}
+
+/* 單邊(Call或Put)的內容。side 可能是 null —— 真實資料裡某些履約價
+   單邊完全沒報價、或反推不出IV，這時要留白，不能顯示成 0 或 undefined */
+function updateSide(el, side, prefix) {
+  const fairEl = el.querySelector(`[data-role="${prefix}Fair"]`);
+  const badgeEl = el.querySelector(`[data-role="${prefix}Badge"]`);
+  const priceEl = el.querySelector(`[data-role="${prefix}Price"]`);
+
+  if (!side) {
+    fairEl.textContent = "";
+    badgeEl.innerHTML = "";
+    priceEl.textContent = "—";
+    priceEl.className = "price na";
+    priceEl.removeAttribute("title");
+    return;
+  }
+
+  const unreliable = side.reliable === false;
+  fairEl.textContent = side.status !== "fair" ? `合理 ${side.fairPrice}` : "";
+  badgeEl.innerHTML = statusBadge(side.status, unreliable);
+  priceEl.textContent = side.price;
+  // 不可信的那幾檔不上色，避免深價外的假訊號看起來跟真訊號一樣醒目
+  priceEl.className = "price " + (unreliable ? "fair" : side.status) +
+    (side.stale ? " stale" : "");
+  priceEl.title = sideTooltip(side);
+}
+
+function updateRowContent(el, row, isAtm) {
+  el.classList.toggle("atm", isAtm);
+  updateSide(el, row.call, "call");
+  updateSide(el, row.put, "put");
+}
+
+function renderChain(data) {
+  // 後端會直接告訴我們哪一檔是ATM(用實際掛牌的履約價去找最接近F的那檔)。
+  // 沒有的話才退回自己四捨五入 —— 那個做法在履約價間距不是100的到期別會抓錯行。
+  const atmStrike = data.atmStrike ?? Math.round(data.underlying.price / 100) * 100;
+  const body = document.getElementById("chainBody");
+
+  // 第一次渲染時，把「載入中…」的佔位文字清掉
+  if (Object.keys(rowElements).length === 0) {
+    body.innerHTML = "";
+  }
+
+  const newStrikes = new Set(data.rows.map((r) => r.strike));
+
+  // 移除已經不在新資料裡的履約價列(例如換到期日之後範圍不同)
+  Object.keys(rowElements).forEach((strikeStr) => {
+    const strike = Number(strikeStr);
+    if (!newStrikes.has(strike)) {
+      rowElements[strike].remove();
+      delete rowElements[strike];
+    }
+  });
+
+  // 依序更新/新增，並用appendChild確保排序正確
+  // (對已經存在畫面上的節點呼叫appendChild只會搬移位置，不會砍掉重建，所以不會閃)
+  data.rows.forEach((row) => {
+    let el = rowElements[row.strike];
+    if (!el) {
+      el = createRow(row.strike);
+      rowElements[row.strike] = el;
+    }
+    updateRowContent(el, row, row.strike === atmStrike);
+    body.appendChild(el);
+  });
+}
+
+/* 判斷是拿什麼當基準算出來的，直接寫在畫面上。
+   基準來源不同(資料庫5日均 / 偏斜曲線 / ATM單點)，同一個「偏貴」的可信度差很多。 */
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"]/g, (c) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+}
+
+function renderMeta(meta) {
+  const el = document.getElementById("metaNote");
+  if (!meta) { el.innerHTML = ""; return; }
+
+  const parts = [];
+  const ex = meta.expiry;
+  if (ex) parts.push(`<b>到期</b> ${ex.date}（剩 ${ex.days} 天）`);
+  parts.push(`<b>盤別</b> ${meta.session === "night" ? "夜盤" : "日盤"}`);
+  if (meta.marketOpen === false) {
+    parts.push(`<span class="warn">⚠ 非交易時段，顯示的是上一盤最後報價</span>`);
+  }
+
+  const line2 = [];
+  ["call", "put"].forEach((k) => {
+    const m = meta[k];
+    if (!m || !m.available) return;
+    // 用 countsReliable 而不是 counts：不可信的那幾檔在表格裡已經被淡化、不上色了，
+    // 統計行還把它們算成「偏貴」的話，表頭跟表格會互相矛盾。
+    const c = m.countsReliable || m.counts;
+    const skipped = m.nUnreliable
+      ? `，另 ${m.nUnreliable} 檔不可信未計入` : "";
+    line2.push(`<b>${k === "call" ? "Call" : "Put"}</b> 基準:${escapeHtml(m.baselineSource)}` +
+      `　偏貴${c.expensive}/合理${c.fair}/便宜${c.cheap}（全鏈${m.nEvaluated}檔${skipped}）`);
+  });
+
+  // 後端算得出東西、但過程中有一邊出事(例如夜盤週選Put整排沒報價)、
+  // 或寫資料庫失敗時，errors 會帶回來。以前這些完全沒印，
+  // Put欄位就只是靜靜地全部顯示「—」，畫面上沒有任何字說明為什麼。
+  const problems = [];
+  if (meta.errors) {
+    const NAME = { C: "Call", P: "Put", db: "寫入資料庫" };
+    Object.keys(meta.errors).forEach((k) => {
+      problems.push(`<span class="warn">⚠ ${NAME[k] || k}：` +
+        `${escapeHtml(meta.errors[k])}</span>`);
+    });
+  }
+
+  const notes = ["※ 判斷僅供參考，不構成投資建議；淡色=報價超過10分鐘，? =偏差百分比失去意義"];
+  if (meta.serverTime) notes.push(`後端更新於 ${meta.serverTime}`);
+
+  el.innerHTML = [parts.join("　"), ...line2, ...problems, notes.join("　")]
+    .map((s) => `<div>${s}</div>`).join("");
+}
+
+document.querySelectorAll("#expiryTypeSegment button").forEach((btn) => {
+  btn.onclick = () => {
+    document.querySelectorAll("#expiryTypeSegment button").forEach((b) => b.classList.remove("active"));
+    btn.classList.add("active");
+    currentExpiryType = btn.dataset.type;
+    saveSelection();
+    refreshAll();
+  };
+});
+
+async function refreshAll() {
+  try {
+    await loadExpiryList();
+  } catch (e) {
+    showError(e.message || String(e));
+    return;             // 到期別都抓不到就不用再打報價API了
+  }
+  await loadChainData();
+}
+
+/* 到期別清單也必須定期重抓，不能只在頁面載入時抓一次：
+   週選會在盤中到期下市(例如週三13:30)，新的合約也會掛上來。
+   清單不更新的話，currentExpiryId 會一直指向一個已經不存在的代碼，
+   後端 pick_contract() 找不到就回404，畫面永遠卡在「更新失敗」。 */
+const EXPIRY_LIST_TTL_MS = 5 * 60 * 1000;
+
+async function tick() {
+  if (Date.now() - expiryListLoadedAt >= EXPIRY_LIST_TTL_MS) {
+    await refreshAll();          // 連清單一起重抓(裡面會自己挑回合法的到期別)
+    return;
+  }
+  await loadChainData();
+}
+
+/* 初始載入 + 每60秒自動更新 */
+refreshAll();
+setInterval(tick, 60000);
+</script>
+
+</body>
+</html>

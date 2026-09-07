@@ -1,0 +1,15 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# 本機測試用的 SQLite 檔。裡面是實際從期交所抓下來的報價快照，
+# 不是程式的一部分，而且會一直長大 —— 要跑就自己 --db quotes.db 生一份。
+*.db
+
+# Claude Code 的本機權限設定，屬於這台機器，不是專案的一部分
+.claude/settings.local.json
+
+# 開發過程用完即丟的驗證腳本
+_*_tmp.py
