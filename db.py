@@ -40,13 +40,19 @@ import re
 import sqlite3
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Any, Iterable, Literal, Optional, Sequence
 
 Session = Literal["day", "night"]
 OptionType = Literal["C", "P"]
 ExpiryType = Literal["week", "month"]
 Dialect = Literal["mysql", "sqlite"]
+
+# 撈「N日均IV」時往回看的日曆天上限。
+# 5個交易日最少橫跨7個日曆天(週一到週五 + 隔週一)，遇到連假還會更長，
+# 所以給到15天的預算。沒有這個下限的話「5日均」其實是「最近5筆」，
+# 那5筆可以是兩個月前的 —— 見 get_monthly_baseline_iv 的說明。
+BASELINE_HISTORY_MAX_AGE_DAYS = 15
 
 
 # ---------------------------------------------------------------------------
@@ -423,22 +429,37 @@ class OptionDB:
     def get_monthly_baseline_iv(
         self, strike_price: float, right_type: OptionType, session: Session,
         expiry_date: date, lookback_days: int = 5,
+        as_of: Optional[date] = None,
+        max_age_days: int = BASELINE_HISTORY_MAX_AGE_DAYS,
     ) -> Optional[float]:
         """
         月選的baseline：同履約價、同買賣權、同交易時段，最近N天IV的平均。
 
-        回傳None代表歷史筆數不足(冷啟動階段)，呼叫端要自己決定fallback
-        (run_live_pipeline.py 的做法是退回用偏斜曲線)。
+        「最近N天」需要兩道限制，缺一不可：
+          LIMIT N               只取前N筆
+          trade_date >= 下限     而且那N筆必須落在 max_age_days 個日曆天內
+
+        只有 LIMIT 沒有時間下限的話，「5日均」實際上是「最近5筆」，
+        那5筆可以是兩個月前的。而這個數字在 analyze_chain() 裡是**最高優先序**
+        的基準(會覆寫偏斜曲線、還會把 out_of_range 取消掉標成可信)——
+        收盤後寫入的排程一斷，整條鏈就會被過期的IV靜默評價。
+
+        as_of 預設今天；自我測試(或回補歷史)要以某一天為基準時才需要傳。
+
+        回傳None代表期間內歷史筆數不足(冷啟動階段、或資料太舊全被濾掉)，
+        呼叫端要自己決定fallback(run_live_pipeline.py 的做法是退回用偏斜曲線)。
         """
+        floor = (as_of or date.today()) - timedelta(days=max_age_days)
         rows = self.query(
             """
             SELECT implied_vol FROM option_iv_history
             WHERE strike_price = %s AND right_type = %s AND session = %s
               AND expiry_date = %s AND expiry_type = 'month'
+              AND trade_date >= %s
             ORDER BY trade_date DESC
             LIMIT %s
             """,
-            (strike_price, right_type, session, expiry_date, lookback_days),
+            (strike_price, right_type, session, expiry_date, floor, lookback_days),
         )
         if not rows:
             return None
@@ -448,6 +469,8 @@ class OptionDB:
     def get_baseline_iv_batch(
         self, right_type: OptionType, session: Session, expiry_date: date,
         lookback_days: int = 5,
+        as_of: Optional[date] = None,
+        max_age_days: int = BASELINE_HISTORY_MAX_AGE_DAYS,
     ) -> dict[float, float]:
         """
         一次撈回整條鏈所有履約價的5日均IV。
@@ -456,16 +479,24 @@ class OptionDB:
         如果每一檔都各發一次 get_monthly_baseline_iv 查詢，
         一分鐘內會打出幾百次DB往返，這在正式環境是不必要的負擔。
         改成一次撈回來在記憶體裡算，DB只需要一次查詢。
+
+        時間下限(max_age_days)的理由跟 get_monthly_baseline_iv 完全一樣，
+        兩支的行為必須一致 —— 自我測試有一條不變式在擋：批次跟逐筆算出來要相同。
+
+        注意這裡只負責「不把過期資料算進平均」。整組到底夠不夠新、要不要採用，
+        是判斷邏輯，由 pricing_service 拿 get_iv_history_latest_date() 決定
+        (硬規則1：判斷邏輯只有一份)。
         """
+        floor = (as_of or date.today()) - timedelta(days=max_age_days)
         rows = self.query(
             """
             SELECT strike_price, trade_date, implied_vol
             FROM option_iv_history
             WHERE right_type = %s AND session = %s AND expiry_date = %s
-              AND expiry_type = 'month'
+              AND expiry_type = 'month' AND trade_date >= %s
             ORDER BY strike_price ASC, trade_date DESC
             """,
-            (right_type, session, expiry_date),
+            (right_type, session, expiry_date, floor),
         )
         buckets: dict[float, list[float]] = {}
         for strike, _trade_date, iv in rows:
@@ -474,6 +505,37 @@ class OptionDB:
             if len(lst) < lookback_days:      # 已按日期倒序，取前N筆就是最近N天
                 lst.append(float(iv))
         return {k: sum(v) / len(v) for k, v in buckets.items() if v}
+
+    def get_iv_history_latest_date(
+        self, right_type: OptionType, session: Session, expiry_date: date,
+    ) -> Optional[date]:
+        """
+        這條鏈的IV歷史最新寫到哪一天 —— 呼叫端用它判斷「收盤後寫入的排程是不是斷了」。
+
+        刻意跟 get_baseline_iv_batch 分成兩支查詢：
+        「平均該用哪幾筆」是資料層的事，「多舊就整組不採用」是判斷邏輯，
+        後者只能住在 pricing_service.py(硬規則1)。多打一次查詢的成本可以忽略 ——
+        批次版本當初要避免的是「每個履約價各打一次」那種幾百次往返。
+
+        沒有任何歷史時回傳None。
+        """
+        rows = self.query(
+            """
+            SELECT MAX(trade_date) FROM option_iv_history
+            WHERE right_type = %s AND session = %s AND expiry_date = %s
+              AND expiry_type = 'month'
+            """,
+            (right_type, session, expiry_date),
+        )
+        if not rows or rows[0][0] is None:
+            return None
+        v = rows[0][0]
+        # MySQL回date物件，SQLite把DATE存成TEXT回字串 —— 統一成date
+        if isinstance(v, datetime):
+            return v.date()
+        if isinstance(v, date):
+            return v
+        return date.fromisoformat(str(v)[:10])
 
     def load_live_quotes(
         self, expiry_type: Optional[ExpiryType] = None,
@@ -626,7 +688,10 @@ if __name__ == "__main__":
     hist = [IvHistoryRow(base + timedelta(days=i), "day", "month", exp,
                          17500, "C", 17480, 150.0, iv) for i, iv in enumerate(ivs)]
     assert db.save_iv_history(hist) == 5
-    got = db.get_monthly_baseline_iv(17500, "C", "day", exp)
+    # as_of 釘在資料的最後一天(base+4)：現在有時間下限了，不釘的話這批
+    # 2026-08 的測試資料會被當成過期資料整批濾掉。
+    as_of = base + timedelta(days=4)
+    got = db.get_monthly_baseline_iv(17500, "C", "day", exp, as_of=as_of)
     print(f"  5日均IV = {got:.6f} (應為 0.150000)")
     assert abs(got - 0.15) < 1e-9
 
@@ -634,7 +699,7 @@ if __name__ == "__main__":
     older = [IvHistoryRow(base - timedelta(days=i + 1), "day", "month", exp,
                           17500, "C", 17480, 150.0, 0.99) for i in range(3)]
     db.save_iv_history(older)
-    got2 = db.get_monthly_baseline_iv(17500, "C", "day", exp)
+    got2 = db.get_monthly_baseline_iv(17500, "C", "day", exp, as_of=as_of)
     print(f"  塞入3筆更早的異常資料(IV=0.99)後 → {got2:.6f} (應仍為 0.150000)")
     assert abs(got2 - 0.15) < 1e-9, "應該只取最近5天"
 
@@ -646,8 +711,22 @@ if __name__ == "__main__":
     print("  ✓ 同一天重跑腳本不會產生重複資料")
 
     # 冷啟動：查沒有資料的履約價要回None
-    assert db.get_monthly_baseline_iv(99999, "C", "day", exp) is None
+    assert db.get_monthly_baseline_iv(99999, "C", "day", exp, as_of=as_of) is None
     print("  ✓ 查無歷史時回傳None(讓呼叫端決定fallback)")
+
+    # 時間下限：同一批資料，把 as_of 推到40天後就該一筆都撈不到。
+    # 沒有這道下限的話「5日均」是「最近5筆」，而它是 analyze_chain() 最高
+    # 優先序的基準 —— 收盤寫入的排程一斷，整條鏈會被兩個月前的IV靜默評價。
+    stale_as_of = base + timedelta(days=40)
+    assert db.get_monthly_baseline_iv(17500, "C", "day", exp, as_of=stale_as_of) is None
+    assert db.get_baseline_iv_batch("C", "day", exp, as_of=stale_as_of) == {}
+    print(f"  ✓ 超過{BASELINE_HISTORY_MAX_AGE_DAYS}天的歷史不會被算進均值"
+          f"(逐筆回None、批次回空dict，呼叫端會退回偏斜曲線)")
+
+    latest = db.get_iv_history_latest_date("C", "day", exp)
+    assert latest == as_of, f"最新一筆應為{as_of}，實際{latest}"
+    print(f"  ✓ get_iv_history_latest_date() = {latest}"
+          f"(呼叫端用它判斷收盤寫入的排程是不是斷了)")
     print("✅ IV歷史測試通過\n")
 
     print("=" * 72)
@@ -659,7 +738,7 @@ if __name__ == "__main__":
             more.append(IvHistoryRow(d, "day", "month", exp, strike, "C",
                                      17480, 150.0, center))
     db.save_iv_history(more)
-    batch = db.get_baseline_iv_batch("C", "day", exp)
+    batch = db.get_baseline_iv_batch("C", "day", exp, as_of=as_of)
     print(f"  一次撈回 {len(batch)} 個履約價的5日均: "
           f"{ {k: round(v, 4) for k, v in sorted(batch.items())} }")
 
@@ -677,7 +756,7 @@ if __name__ == "__main__":
     # 最重要的不變式：批次撈跟逐筆查，結果必須完全一致。
     # (批次是為了效能才存在的，一旦跟逐筆算出不同答案就失去意義)
     for k in batch:
-        single = db.get_monthly_baseline_iv(k, "C", "day", exp)
+        single = db.get_monthly_baseline_iv(k, "C", "day", exp, as_of=as_of)
         assert abs(single - batch[k]) < 1e-9, \
             f"批次與逐筆結果不一致 K={k}: 批次{batch[k]} vs 逐筆{single}"
     print("  ✓ 批次結果與逐筆查詢完全一致(這是批次版本存在的前提)")

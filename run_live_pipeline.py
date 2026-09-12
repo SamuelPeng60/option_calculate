@@ -296,8 +296,13 @@ def run(
         print(f"※ 有 {res.n_unreliable} 檔標記為不可信(標?)，資料庫裡 reliable=0，"
               f"前端可用 only_reliable 濾掉。原因有兩種：")
         if res.n_out_of_range:
-            print(f"   - {res.n_out_of_range} 檔落在偏斜曲線的配適範圍外(基準是外插來的)。"
-                  f"可用 --skew-range 放寬範圍")
+            if res.curve is not None:
+                print(f"   - {res.n_out_of_range} 檔落在偏斜曲線的配適範圍外(基準是外插來的)。"
+                      f"可用 --skew-range 放寬範圍")
+            else:
+                print(f"   - {res.n_out_of_range} 檔離價平太遠，而這次沒有曲線可用、"
+                      f"基準只有ATM單點那一個IV，對深價外不成立。"
+                      f"可用 --skew-range 放寬範圍")
         n_tiny = res.n_unreliable - res.n_out_of_range
         if n_tiny > 0:
             print(f"   - {n_tiny} 檔的合理價過小(深度價外)，百分比偏差失去意義")

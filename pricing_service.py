@@ -23,6 +23,7 @@ pricing_service.py
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from datetime import date
 from typing import Literal, Optional
@@ -48,6 +49,19 @@ BASELINE_MAX_AGE = 900   # 挑基準用的報價，最多接受15分鐘前的
 BASELINE_MIN_VOL = 1     # 且至少要有成交量
 
 STALE_AGE = 600          # 超過這個秒數的報價視為陳舊(CLI標*，前端淡化顯示)
+
+# 資料庫5日均基準的新鮮度門檻：最新一筆超過這個天數，整組不採用(退回偏斜曲線)。
+# 硬規則2 要求基準池「夠新鮮」，但那道守門原本只套在即時報價那條路上；
+# DB 這條是最高優先序、還會把 out_of_range 取消掉標成可信，卻完全沒有對應檢查 ——
+# 收盤後寫入的排程一斷，整條鏈就被過期的IV靜默評價。
+# 給5天(一個正常週末是3天，含一天國定假日是4天)；再長的連假會退回曲線，
+# 那是安全的方向 —— 寧可用當下這批報價配出來的曲線，也不要用上週的IV。
+BASELINE_DB_MAX_STALE_DAYS = 5
+
+# 退回「ATM單點」當基準時，離價平多遠就不能當真(|ln(K/F)|)。
+# 曲線那條路靠 curve.in_range() 擋外插；ATM單點對每個履約價都給同一個IV，
+# 比曲線更沒有外插概念，需要的守門只會更多不會更少。
+ATM_BASELINE_K_RANGE = 0.15
 
 
 class NoQuoteDataError(RuntimeError):
@@ -93,6 +107,7 @@ class ChainAnalysis:
     curve: Optional[SkewCurve] = None
     curve_rejected: bool = False        # 有配但品質不佳，已退回ATM單點
     db_baseline_count: int = 0
+    db_baseline_stale_days: Optional[int] = None   # DB有資料但太舊、整組退掉時，記下最新一筆幾天前
 
     # 資料品質診斷
     total_before_filter: int = 0
@@ -143,6 +158,19 @@ class ChainAnalysis:
         strikes = [e.strike for e in self.evals]
         ci = strikes.index(self.atm_strike)
         return self.evals[max(0, ci - n): ci + n + 1]
+
+
+def _within_atm_range(strike: float, F: float, k_range: float) -> bool:
+    """
+    這個履約價離價平夠近、近到可以直接套用ATM那一點的IV嗎(|ln(K/F)| <= k_range)。
+
+    只有在沒有曲線可用時才會走到這裡。深價外的IV其實會回升(微笑的翹尾)，
+    拿ATM那個偏低的IV去評價，那幾檔會整批被標成「偏貴」——
+    就是 iv_skew.SkewCurve.in_range 檔頭記的那個坑(深價外37檔100%誤判)。
+    """
+    if strike <= 0 or F <= 0:
+        return False
+    return abs(math.log(strike / F)) <= k_range
 
 
 def analyze_chain(
@@ -267,6 +295,21 @@ def analyze_chain(
             db_baseline = db.get_baseline_iv_batch(
                 right_type, session, contract.expiry_date, lookback_days=5
             )
+            # 撈回來還要看「這條鏈的歷史最新寫到哪一天」。
+            # db.get_baseline_iv_batch() 只保證每一筆都在時間下限內(不會混進兩個月前的)，
+            # 但排程斷掉時整組會一起變舊 —— 上週五寫完就沒再寫，撈回來的5筆全是上週的，
+            # 每一筆都通過下限，平均值卻已經不能代表今天的市場。
+            # 而這是最高優先序的基準，還會把 out_of_range 取消掉，所以寧可整組不採用。
+            if db_baseline:
+                latest = db.get_iv_history_latest_date(
+                    right_type, session, contract.expiry_date
+                )
+                # 撈得到資料卻查不到最新日期(理論上不會發生)也一樣不採用 ——
+                # 但要記成 -1 而不是 None，不然下面的訊息不會印，變成靜默退掉。
+                stale_days = (date.today() - latest).days if latest is not None else -1
+                if stale_days < 0 or stale_days > BASELINE_DB_MAX_STALE_DAYS:
+                    result.db_baseline_stale_days = stale_days
+                    db_baseline = {}
         except Exception:
             db_baseline = {}   # 讀不到就退回即時算法，不要讓整條鏈算不出來
     result.db_baseline_count = len(db_baseline)
@@ -281,7 +324,19 @@ def analyze_chain(
     else:
         result.baseline_source = "ATM單點"
 
+    # 退掉的理由要講出來，不要靜默退回。baseline_source 是CLI跟前端都會顯示的欄位，
+    # baseline_quality_note 在有曲線時不印。
+    if result.db_baseline_stale_days is not None:
+        how_old = (f"{result.db_baseline_stale_days}天前"
+                   if result.db_baseline_stale_days >= 0 else "日期查不到")
+        result.baseline_source += (
+            f" ⚠ 資料庫5日均最新一筆是{how_old}"
+            f"(超過{BASELINE_DB_MAX_STALE_DAYS}天，整組不採用；收盤寫入的排程可能斷了)"
+        )
+
     # 7) 對整條鏈做判斷。基準優先序：資料庫5日均 > 偏斜曲線 > ATM單點
+    #    ATM單點路徑用的範圍跟曲線配適同一個參數(--skew-range 一次放寬兩邊)
+    atm_k_range = skew_k_range if skew_k_range is not None else ATM_BASELINE_K_RANGE
     qmap = {q.strike_price: q for q in quotes}
     for k in sorted(iv_map):
         q = qmap[k]
@@ -293,6 +348,12 @@ def analyze_chain(
             # 配適範圍外的基準是外插來的，不能當真
             # (不標記的話深價外會100%被誤判成偏貴，見 iv_skew.SkewCurve.in_range)
             out_of_range = not curve.in_range(k)
+        else:
+            # 沒有曲線(配不出來、或 is_reliable() 不過而被退回ATM單點)時，
+            # 資料品質其實比有曲線時更差，守門不能反而消失 ——
+            # 原本 out_of_range 只在 curve is not None 時才可能成立，
+            # 於是「最該擋的情況」變成一個守門都沒有。
+            out_of_range = not _within_atm_range(k, F, atm_k_range)
         if k in db_baseline:
             baseline_iv = db_baseline[k]     # 5日均不受配適範圍限制，可以信
             out_of_range = False

@@ -106,6 +106,13 @@ python taifex_fetch.py        # 這個會實際連期交所
      不然計數器會大於 `n_unreliable`，CLI 的 `n_tiny` 變負數。
    - `counts`(全鏈) vs `reliable_counts`(只算可信)：統計行一律用後者，
      不然表頭說「偏貴6檔」但表格裡只有2檔紅的。
+   - `db.get_baseline_iv_batch()` 的 `trade_date >=` 下限 + `pricing_service` 的
+     `BASELINE_DB_MAX_STALE_DAYS` 整組退掉，是兩道不同的守門，兩道都要在：
+     下限擋「平均裡混進兩個月前的單筆」，整組退擋「排程斷了、五筆一起變舊」。
+     只留一道會漏掉另一種。
+   - `pricing_service` 沒有曲線時走的 `_within_atm_range()`：ATM單點對每個履約價
+     都給同一個IV，深價外的翹尾完全沒被吸收。守門不能因為「資料更差、配不出曲線」
+     就消失 —— 那正是最該擋的時候。
    - `backfill_monthly_iv_history()` 的 `underlying_close_fn` 是必填的，
      沒有它就只能拿履約價當F，反推出來的IV是假的 —— 而那批數字會被
      `analyze_chain()` 當成最高優先序的基準靜默採用。
@@ -126,12 +133,14 @@ python taifex_fetch.py        # 這個會實際連期交所
   `.gitignore` 擋掉 `*.db`(本機報價快照)、`.claude/settings.local.json`、`_*_tmp.py`。
   還**沒加 LICENSE** —— 公開 repo 沒授權條款等於「保留所有權利」，別人不能合法使用。
 
-## 下次接手先看這裡 (更新於 2026-09-11)
+## 下次接手先看這裡 (更新於 2026-09-12)
 
 **下一個日盤：2026-09-14(一) 08:45–13:45**，那才是這個工具真正該用的時段。
 
-⚠ 2026-09-11 做過一次全面邏輯檢查，找到 8 個問題(3 個會實際誤標)，
-**動任何計算之前先看下面「下次要做：修這 8 個邏輯問題」那一節**。
+⚠ 2026-09-11 做過一次全面邏輯檢查，找到 8 個問題(3 個會實際誤標)。
+**2026-09-12 已修掉 A 跟 C(兩個紅的)**，剩 6 個，
+**動任何計算之前先看下面「下次要做：修剩下這 6 個邏輯問題」那一節** ——
+還沒修的紅色是 **B(到期日當天 T)**，那個要先決定 T 怎麼算。
 離線自我測試 5 支當時全過 —— 那些問題測試測不到。
 
 起 server：
@@ -168,27 +177,37 @@ python serve_dashboard.py --min-volume 10 --max-age 600   # 想看乾淨訊號�
 - [ ] **`_dbverify_tmp.py` 要留嗎？** 目前被 `.gitignore` 擋掉沒進 repo
       (它讀的 `_t.db` 也沒進去，推上去也跑不動)。要留跟我說。
 
-## 下次要做：修這 8 個邏輯問題 (2026-09-11 全面檢查找到的)
+## 下次要做：修剩下這 6 個邏輯問題 (2026-09-11 全面檢查找到的)
 
 離線自我測試那 5 支當時全過，這些是「測試測不到、但會實際誤標」的問題。
-**修的順序建議 A → C → B**，A/C 都是十行內的守門，B 要先決定到期日當天 T 怎麼算。
+A 跟 C 已於 2026-09-12 修掉(保留在下面當紀錄)，**下一個是 B**，
+但 B 要先決定到期日當天 T 怎麼算，不是十行內能解決的。
 
-### A. `get_baseline_iv_batch()` 沒有時間下限 —— 「5日均」其實是「最近5筆」🔴
+### A. ~~`get_baseline_iv_batch()` 沒有時間下限~~ ✅ 已修 (2026-09-12)
 
-`db.py:460-476` 的 SQL 只有 `ORDER BY trade_date DESC`，**沒有 `WHERE trade_date >= ?`**。
-每個履約價取前5筆，那5筆可以是兩個月前的。實測塞5筆 2026-07-10 的資料、之後全空白：
+**原本的問題**：`db.py` 的 SQL 只有 `ORDER BY trade_date DESC`，沒有 `WHERE trade_date >= ?`，
+所以「5日均」其實是「最近5筆」，那5筆可以是兩個月前的。而它在 `analyze_chain()` 是
+**最高優先序**基準(覆寫曲線、還把 `out_of_range` 取消掉標成可信)——
+收盤後寫入的 job 一斷，整條鏈就被過期IV靜默評價。
 
-```
-get_baseline_iv_batch("C","day",2026-09-16) → {47300.0: 0.45}
-```
+**修法(兩道守門，都要在)**：
 
-痛點在 `pricing_service.py:296-298`：這是**最高優先序**基準，覆寫曲線、還把
-`out_of_range` 取消掉標成可信。硬規則2 要求基準池「15分鐘內 + 有成交量」，
-但那個守門只套在即時報價那條路，**DB 這條完全沒有對應檢查**。
-收盤後寫入的 job 一斷，整條鏈就被兩個月前的 IV 靜默評價。
+| 守門 | 位置 | 擋什麼 |
+|---|---|---|
+| `trade_date >= as_of - max_age_days` | `db.py` `BASELINE_HISTORY_MAX_AGE_DAYS = 15` | 平均裡混進兩個月前的**單筆** |
+| 最新一筆 > N 天 → 整組不採用 | `pricing_service.py` `BASELINE_DB_MAX_STALE_DAYS = 5` | 排程斷掉、**五筆一起**變舊 |
 
-修法：SQL 加 `trade_date >= (今天 - N)` 的下限，並且撈回來後檢查最新一筆有多舊，
-太舊就整個不採用(退回曲線)，不要靜默使用。
+- 新增 `db.get_iv_history_latest_date()`，讓 `analyze_chain()` 判斷「寫入排程是不是斷了」。
+  刻意分成兩支查詢：「平均用哪幾筆」是資料層，「多舊就不採用」是判斷邏輯(硬規則1)。
+  多一次查詢無所謂 —— 批次版當初要避免的是「每個履約價各打一次」那種幾百次往返。
+- 退掉時**不靜默**：`baseline_source` 會接上
+  `⚠ 資料庫5日均最新一筆是40天前(超過5天，整組不採用；收盤寫入的排程可能斷了)`，
+  CLI 跟前端都看得到。連「撈得到資料卻查不到最新日期」也記成 `-1` 而不是 `None`，
+  就是為了不讓它靜默退掉。
+- `get_monthly_baseline_iv()` 同步改(兩支的行為必須一致，自我測試有不變式在擋)。
+- 新舊呼叫相容：`as_of` / `max_age_days` 都是選填，預設 `date.today()`。
+- 測試：`db.py` 測試5 加了「把 as_of 推到40天後 → 逐筆回None、批次回空dict」
+  跟 `get_iv_history_latest_date()` 的驗證。
 
 ### B. 到期日當天 `T` 被灌水成 1/365 🔴
 
@@ -211,17 +230,31 @@ get_baseline_iv_batch("C","day",2026-09-16) → {47300.0: 0.45}
 要修得先決定 T 怎麼算(算到 13:30 收盤？還是算到隔天早上結算價決定的時點？
 TXO 最後結算價是到期日開盤後30分鐘的加權平均，這件事會影響答案)。
 
-### C. `out_of_range` 保護只存在於偏斜曲線那條路 🔴
+### C. ~~`out_of_range` 保護只存在於偏斜曲線那條路~~ ✅ 已修 (2026-09-12)
 
-`pricing_service.py:289-295`：`out_of_range` 初始 `False`，
-**只有 `curve is not None` 才可能被設成 True**。
+**原本的問題**：`out_of_range` 初始 `False`，只有 `curve is not None` 才可能被設成 True。
+所以 `curve.is_reliable()` 不過、退回ATM單點時(資料品質**更差**的時候)，
+深價外反而一個守門都沒有 —— 直接回到 `iv_skew.SkewCurve.in_range` 檔頭那個坑
+(深價外 37 檔 100% 全被標偏貴)。
 
-所以 `curve.is_reliable()` 不過、`curve_rejected=True` 退回 ATM 單點時
-(也就是資料品質**更差**的時候)，深價外反而一個守門都沒有 ——
-直接回到 `iv_skew.SkewCurve.in_range` 檔頭記的那個坑：「深價外 37 檔 100% 全被標偏貴」。
-ATM 單點比曲線更沒有外插概念，需要的守門只會更多不會更少。
+**修法**：`pricing_service._within_atm_range()`，沒有曲線時用 `|ln(K/F)| <= k_range`
+當守門，範圍跟曲線配適共用 `skew_k_range`(所以 `--skew-range` 一次放寬兩邊，
+CLI 的提示文字也還是對的)。預設 `ATM_BASELINE_K_RANGE = 0.15`。
 
-修法：ATM 單點路徑也要有一個 moneyness 範圍(例如 |ln(K/F)| > 0.15 就標 unreliable)。
+實測(合成資料，101檔履約價 47300±25000、真實IV 0.20)：
+
+```
+                        修正前            修正後
+use_skew_curve=True     19 檔 out_of_range   19 檔   (本來就有守門，不受影響)
+use_skew_curve=False     0 檔                18 檔   ← |ln(K/F)|>0.15 的正好 18 檔
+曲線配不出來退回ATM單點     0 檔                 2 檔
+```
+
+CLI 的診斷文字跟著分兩種講法(`run_live_pipeline.py`)，
+沒有曲線時不能再說「落在偏斜曲線的配適範圍外」。
+
+不變式仍然成立：`out_of_range ⊆ unreliable`(設了旗標就會 `verdict.reliable = False`)，
+所以 H 的 `n_tiny` 不會變負數。
 
 ### D. `mid` 報價的 `age_sec` 量錯東西了 🟡
 
