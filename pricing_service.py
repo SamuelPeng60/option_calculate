@@ -35,8 +35,10 @@ from db import OptionDB
 from taifex_fetch import (
     ContractMonth,
     RawLiveQuote,
+    SETTLEMENT_TIME,
     fetch_live_quotes,
     quote_age_seconds,
+    years_to_settlement,
 )
 
 R = 0.015              # 無風險利率假設
@@ -66,6 +68,19 @@ ATM_BASELINE_K_RANGE = 0.15
 
 class NoQuoteDataError(RuntimeError):
     """過濾後沒有報價、或整條鏈都反推不出IV —— 算不出結果但不是程式錯誤"""
+
+
+class ContractSettledError(NoQuoteDataError):
+    """
+    結算價已定，這條鏈沒有時間價值可以判斷了(不是錯誤，是這個合約的生命結束了)。
+
+    刻意繼承 NoQuoteDataError：兩個呼叫端都已經在處理那個例外，
+    CLI 會印訊息收工、網頁會只標這一邊算不出來而另一邊照常顯示 ——
+    正是我們要的行為，不必兩邊各補一段。
+
+    為什麼不乾脆給它一個 T 的下限硬算下去：09:30 之後的價格裡沒有時間價值，
+    硬反推會擠出一個不存在的IV，然後畫面照常上色 —— 那比什麼都不顯示更危險。
+    """
 
 
 @dataclass
@@ -198,7 +213,17 @@ def analyze_chain(
     """
     F = underlying_price
     days_to_expiry = max((contract.expiry_date - date.today()).days, 0)
-    T = max(days_to_expiry, 1) / 365
+
+    # T 算到結算價決定的那一刻(到期日 09:30)，不是「到期日整天」。
+    # 理由跟實測數字見 taifex_fetch.years_to_settlement 上面那段。
+    T = years_to_settlement(contract.expiry_date)
+    if T <= 0:
+        raise ContractSettledError(
+            f"{contract.display_name} 的結算價已於 {contract.expiry_date} "
+            f"{SETTLEMENT_TIME.strftime('%H:%M')} 決定"
+            f"(TXO最後結算價=到期日開盤後30分鐘的加權指數平均)，"
+            f"時間價值歸零，不再做貴賤判斷。"
+        )
 
     result = ChainAnalysis(
         contract=contract,
@@ -406,4 +431,9 @@ def pick_contract(
     pool = [m for m in months if expiry_type is None or m.expiry_type == expiry_type]
     if not pool:
         return None
-    return min(pool, key=lambda m: m.expiry_date)
+    # 結算價已定的不能當預設值。期交所到期後不會馬上下架 —— 實測 2026-09-12
+    # 掛牌清單裡第一個就是前一天到期的 202609F2，挑到它的話 analyze_chain()
+    # 會直接丟 ContractSettledError，整個畫面預設就是一片錯誤訊息。
+    # (使用者自己指定 expire_month 時不擋，那是他主動要看的，該讓他看到原因)
+    alive = [m for m in pool if years_to_settlement(m.expiry_date) > 0]
+    return min(alive or pool, key=lambda m: m.expiry_date)

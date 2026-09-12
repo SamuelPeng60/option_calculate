@@ -23,7 +23,7 @@ taifex_fetch.py
 
 from __future__ import annotations
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time as dtime, timedelta
 from typing import Literal, Optional
 import io
 
@@ -36,6 +36,47 @@ OptionType = Literal["C", "P"]
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
 }
+
+
+# ---------------------------------------------------------------------------
+# 剩餘時間 T：算到「結算價決定的那一刻」，不是到期日整天
+# ---------------------------------------------------------------------------
+#
+# TXO 的最後結算價 = 到期日「開盤後30分鐘內」台股加權指數的簡單算術平均，
+# 也就是 09:00–09:30 那段。09:30 一到，這口合約的損益就已經確定了 ——
+# 它還會繼續掛牌交易到 13:45，但那之後的價格裡不含任何時間價值。
+#
+# 為什麼這件事非算對不可(實測)：
+#   原本是 T = max(days_to_expiry, 1) / 365，到期日當天 days=0 → T=1/365，
+#   但實際只剩幾小時。同一條鏈裡「反推IV」跟「算合理價」用的是同一個錯的T，
+#   所以偏斜曲線/ATM那兩條路的判斷會自我抵銷(實測偏差 0.0%)；
+#   但資料庫5日均那條**完全不抵銷**，因為IV是與T無關的參數：
+#       到期日 11:00、市場真實 IV=0.20
+#         程式反推出來的 IV = 0.0646        ← 畫面顯示的IV本身就是錯的
+#         基準=同鏈曲線   → fair   0.0%     ✅ 抵銷
+#         基準=DB 5日均   → cheap -67.7%    ❌ 整條鏈假性便宜
+#   而且不管走哪條路，到期日當天畫面上顯示的IV都是錯的。
+SETTLEMENT_TIME = dtime(9, 30)
+
+# 曆年基準，跟原本的 days/365 一致(不是交易日基準)
+SECONDS_PER_YEAR = 365 * 24 * 3600
+
+# 各盤別的收盤時刻 —— 回補歷史時要知道「那天收盤當下」還剩多少時間。
+# 夜盤的 cursor_date 是「歸屬交易日」(8/18夜盤歸在8/19)，所以收盤是當天凌晨05:00。
+SESSION_CLOSE_TIME: dict[str, dtime] = {"day": dtime(13, 45), "night": dtime(5, 0)}
+
+
+def years_to_settlement(expiry_date: date, now: Optional[datetime] = None) -> float:
+    """
+    到「結算價決定時點」還剩幾年(Black-76 的 T)。
+
+    **可能回傳 0 或負數**，代表結算價已定、時間價值歸零 —— 呼叫端一定要自己處理，
+    不要 max(T, 某個下限) 硬擠出一個正數：那正是原本 max(days,1)/365 的錯，
+    會讓畫面顯示一個不存在的IV。
+    """
+    now = now or datetime.now()
+    settle = datetime.combine(expiry_date, SETTLEMENT_TIME)
+    return (settle - now).total_seconds() / SECONDS_PER_YEAR
 
 
 # ---------------------------------------------------------------------------
@@ -158,7 +199,15 @@ def backfill_monthly_iv_history(
                     if underlying_close <= 0:
                         continue
 
-                    T = max((expiry_date - cursor_date).days, 1) / 365
+                    # 那天「收盤當下」還剩多少時間。跟 analyze_chain() 用同一個
+                    # 結算時點，兩邊的T基準不一致的話，這批寫進 option_iv_history
+                    # 的IV會系統性偏掉 —— 而它是最高優先序的基準。
+                    T = years_to_settlement(
+                        expiry_date,
+                        datetime.combine(cursor_date, SESSION_CLOSE_TIME[session]),
+                    )
+                    if T <= 0:
+                        continue      # 那個時點結算價已定，沒有IV可言
                     iv_result = implied_vol(
                         market_price=close_price,
                         F=underlying_close,
@@ -794,6 +843,27 @@ if __name__ == "__main__":
     assert quote_age_seconds("120501", _noon) == 86099, "超過容忍值就該當成跨午夜"
     print("  ✓ 同日、跨午夜、時鐘偏差、非法輸入都正確處理")
     print("✅ 報價新鮮度計算測試通過\n")
+
+    # 剩餘時間T：算到「到期日09:30結算價決定」，不是到期日整天
+    _exp = date(2026, 9, 16)
+    _yr = SECONDS_PER_YEAR
+    assert abs(years_to_settlement(_exp, datetime(2026, 9, 16, 8, 30)) - 3600 / _yr) < 1e-12, (
+        "到期日早上8:30該剩1小時")
+    assert years_to_settlement(_exp, datetime(2026, 9, 16, 9, 30)) == 0.0, (
+        "09:30整該剛好歸零")
+    assert years_to_settlement(_exp, datetime(2026, 9, 16, 11, 0)) < 0, (
+        "09:30之後必須是負的 —— 呼叫端要看得出結算價已定，不能被下限蓋掉")
+    # 這是B的核心：舊寫法 max(days,1)/365 在到期日當天會把「剩1小時」灌成「剩一整天」
+    _old_T = max((_exp - date(2026, 9, 16)).days, 1) / 365
+    _new_T = years_to_settlement(_exp, datetime(2026, 9, 16, 8, 30))
+    assert _old_T / _new_T > 20, f"舊寫法把1小時灌成{_old_T * 365 * 24:.1f}小時"
+    # 到期前一天的夜盤(凌晨那段)也要算得出來
+    _night = years_to_settlement(_exp, datetime(2026, 9, 16, 3, 0))
+    assert abs(_night * _yr - 6.5 * 3600) < 1e-6, "到期日凌晨3點該剩6.5小時"
+    print(f"  ✓ 到期日08:30剩 {_new_T * 365 * 24:.2f} 小時"
+          f"(舊寫法會說 {_old_T * 365 * 24:.0f} 小時)、09:30歸零、之後為負")
+    print("✅ 剩餘時間T測試通過")
+    print()
 
     print("=" * 70)
     print("Part 2: 實際連線測試(需要網路，連 mis.taifex.com.tw)")
