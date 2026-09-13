@@ -98,6 +98,16 @@
     color: var(--text-primary);
   }
 
+  /* 月選/週選 跟 顯示範圍 放同一列，窄螢幕自動換行 */
+  .controls {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    column-gap: 10px;
+  }
+  .segment-label { font-size: 12px; color: var(--text-muted); margin-bottom: 10px; }
+  .segment.small button { padding: 7px 12px; }
+
   /* ---- 到期日期選單 ---- */
   .expiry-list {
     display: flex;
@@ -267,9 +277,18 @@
     </div>
   </div>
 
-  <div class="segment" id="expiryTypeSegment">
-    <button data-type="month" class="active">月選</button>
-    <button data-type="week">週選</button>
+  <div class="controls">
+    <div class="segment" id="expiryTypeSegment">
+      <button data-type="month" class="active">月選</button>
+      <button data-type="week">週選</button>
+    </div>
+    <span class="segment-label" style="margin-left:auto">顯示範圍</span>
+    <!-- 價平上下各幾檔。「全部」送 100 = 後端的上限(serve_dashboard 會夾在 0~100) -->
+    <div class="segment small" id="windowSegment">
+      <button data-window="10" class="active">±10</button>
+      <button data-window="20">±20</button>
+      <button data-window="100" title="價平上下各100檔(後端上限)，遠月深價外也看得到">全部</button>
+    </div>
   </div>
 
   <div class="expiry-list" id="expiryList"></div>
@@ -345,7 +364,9 @@ async function fetchExpiryList(expiryType) {
 async function fetchChainData(expiryType, expiryId) {
   if (USE_MOCK_DATA) return mockChainData(expiryType, expiryId);
   const q = expiryId ? `&expiry=${encodeURIComponent(expiryId)}` : "";
-  return await getJson(`/api/quotes?type=${expiryType}${q}`, "抓報價資料");
+  // 一律帶 window：不帶的話吃 server 的 --window 預設值(10)，畫面上就調不了範圍 ——
+  // 實測 202610 Call 掛到 54500，預設只看得到 45000~48000
+  return await getJson(`/api/quotes?type=${expiryType}${q}&window=${currentWindow}`, "抓報價資料");
 }
 
 /* ---- 以下都是模擬資料產生器，之後接真後端可以整段刪除 ---- */
@@ -719,6 +740,38 @@ document.querySelectorAll("#expiryTypeSegment button").forEach((btn) => {
     currentExpiryType = btn.dataset.type;
     saveSelection();
     refreshAll();
+  };
+});
+
+/* 顯示範圍(價平上下各幾檔)。跟到期別選擇分開存 ——
+   loadExpiryList() 會依清單內容重寫 txo_dashboard_selection，混在一起容易被蓋掉。 */
+const WINDOW_KEY = "txo_dashboard_window";
+const WINDOW_CHOICES = [10, 20, 100];
+let currentWindow = (() => {
+  try {
+    const v = Number(localStorage.getItem(WINDOW_KEY));
+    return WINDOW_CHOICES.includes(v) ? v : 10;
+  } catch (e) {
+    return 10;
+  }
+})();
+
+function syncWindowButtons() {
+  document.querySelectorAll("#windowSegment button").forEach((b) => {
+    b.classList.toggle("active", Number(b.dataset.window) === currentWindow);
+  });
+}
+syncWindowButtons();
+
+document.querySelectorAll("#windowSegment button").forEach((btn) => {
+  btn.onclick = async () => {
+    currentWindow = Number(btn.dataset.window);
+    syncWindowButtons();
+    try { localStorage.setItem(WINDOW_KEY, String(currentWindow)); } catch (e) { /* 存不了就只影響這次瀏覽 */ }
+    await loadChainData();
+    // 「全部」會變成一百多列，停在原本的捲動位置會找不到價平在哪，直接捲過去
+    const atmRow = document.querySelector("#chainBody .atm");
+    if (atmRow) atmRow.scrollIntoView({ block: "center" });
   };
 });
 

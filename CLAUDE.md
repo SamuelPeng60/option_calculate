@@ -29,7 +29,7 @@ taifex_fetch.py    black76_iv.py       iv_skew.py      db.py
 | `pricing_service.py` | **計算核心** `analyze_chain()`，不印任何字、只回 `ChainAnalysis` |
 | `run_live_pipeline.py` | CLI，只負責把 `ChainAnalysis` 印成表格 + 寫DB |
 | `serve_dashboard.py` | 網頁後端，`/api/expiries`、`/api/quotes`、`/api/health` |
-| `options_dashboard.html` | 前端，60秒自動更新 |
+| `options_dashboard.html` | 前端，60秒自動更新；「顯示範圍」選單 ±10/±20/全部(`window`=10/20/100，存 localStorage `txo_dashboard_window`) |
 | `taifex_fetch.py` | 期交所 mis API + 歷史回補；到期別代碼解析(`parse_expiry_code` / `ContractMonth`)；剩餘時間T(`years_to_settlement`，錨在到期日09:30結算) |
 | `black76_iv.py` | 定價、反推IV、`evaluate_option()` 貴賤判斷 |
 | `iv_skew.py` | 波動率偏斜曲線配適(消除skew假訊號) |
@@ -43,6 +43,10 @@ taifex_fetch.py    black76_iv.py       iv_skew.py      db.py
 # 網頁版(預設 http://127.0.0.1:8000)
 python serve_dashboard.py --open
 python serve_dashboard.py --db quotes.db --write-db   # 順便累積歷史，養月選的5日均基準
+# 價平上下幾檔由網頁的「顯示範圍」選單決定(一律帶 ?window=)，server 的 --window
+# 只剩「API 沒帶 window 時」的預設值。後端夾在 0~100，快取 key 含 window，
+# 所以切換範圍會多打一次期交所(20秒內切回同一個範圍吃快取)。
+# 背景：預設 ±10 看不到遠月深價外 —— 實測 202610 Call 掛到 54500，±10 只到 48000。
 
 # CLI版
 python run_live_pipeline.py --list
