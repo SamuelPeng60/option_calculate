@@ -456,7 +456,7 @@ def _pick_price(last: float, bid: float, ask: float) -> tuple[float, str]:
 # 這個坑剛好打在最不該出錯的地方：CTime 等於「現在這一秒」的，就是當下正在成交、
 # 流動性最好的那幾檔。本機時鐘只要慢一秒，它們全部會被當成最陳舊的報價：
 #   - 被 max_age_sec 濾掉
-#   - 被踢出挑基準的池子(BASELINE_MAX_AGE=900)，基準改用比較舊的報價
+#   - 被踢出挑基準的池子(pricing_service.BASELINE_MAX_AGE)，基準改用比較舊的報價
 #   - 配偏斜曲線時權重掉到 0.5**(86399/900) ≈ 1e-29，等於完全不採計
 #   - 畫面標成 stale 淡化顯示
 #

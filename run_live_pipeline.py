@@ -303,9 +303,11 @@ def run(
                 print(f"   - {res.n_out_of_range} 檔離價平太遠，而這次沒有曲線可用、"
                       f"基準只有ATM單點那一個IV，對深價外不成立。"
                       f"可用 --skew-range 放寬範圍")
-        n_tiny = res.n_unreliable - res.n_out_of_range
-        if n_tiny > 0:
-            print(f"   - {n_tiny} 檔的合理價過小(深度價外)，百分比偏差失去意義")
+        # 直接數，不要用 n_unreliable - n_out_of_range 反推：
+        # 一檔可以同時「合理價過小」又「在配適範圍外」，減法會把重疊的那幾檔漏掉。
+        # 也因為會重疊，這兩行的數字相加可以大於 n_unreliable，那是正常的。
+        if res.n_tiny:
+            print(f"   - {res.n_tiny} 檔的合理價過小(深度價外)，百分比偏差失去意義")
     print("※ 判斷僅供參考，不構成投資建議；沒成交量的報價可靠度低")
 
 

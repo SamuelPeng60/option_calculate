@@ -49,9 +49,10 @@ python run_live_pipeline.py --list
 python run_live_pipeline.py --expiry 202609 --right P --window 8
 python run_live_pipeline.py --min-volume 10 --max-age 300    # 盤中建議這樣用
 
-# 自我測試(前四個不需網路)
+# 自我測試(除了最後一個都不需網路)
 python black76_iv.py && python iv_baseline.py && python iv_skew.py
 python db.py && python run_demo_pipeline.py
+python pricing_service.py     # analyze_chain() 本身的測試(合成報價鏈，F/G/H 的斷言在這)
 python taifex_fetch.py        # 這個會實際連期交所
 ```
 
@@ -60,7 +61,9 @@ python taifex_fetch.py        # 這個會實際連期交所
 1. **判斷邏輯只能改 `pricing_service.py`**。CLI 跟網頁後端都走 `analyze_chain()`，
    不要在任何一邊複製一份計算 —— 基準IV優先序、陳舊報價過濾這些規則走鐘的代價很大。
 2. **基準優先序不要動**：資料庫5日均 > 偏斜曲線 > ATM單點。
-   挑基準的報價池必須是「15分鐘內 + 有成交量」(`BASELINE_MAX_AGE`/`BASELINE_MIN_VOL`)。
+   挑基準的報價池必須是「10分鐘內 + 有成交量」(`BASELINE_MAX_AGE`/`BASELINE_MIN_VOL`)。
+   `BASELINE_MAX_AGE = STALE_AGE` 是刻意綁在一起的：畫面標 `*` 說不可信的報價，
+   不可以背地裡被拿去當基準。要調只能往嚴的方向，不要再拆成兩個數字。
    實測基準被一筆3.6小時前的報價污染，整條鏈幾乎每檔都被誤標偏貴。
 3. **Call/Put 必須用同一個 F、同一批報價**。所以 `analyze_chain()` 的 `underlying_price`
    是呼叫端傳進去的，不是它自己抓。
@@ -85,25 +88,31 @@ python taifex_fetch.py        # 這個會實際連期交所
      主鍵已經分得開，不要為了這個改schema。
    - 細節見 README「到期別代碼怎麼看」。
 7. **畫面上「合理」是刻意不標徽章的**，不要當成 bug 去「修」。
-   語意是：只標例外，不標正常。三種狀態在畫面上長這樣 ——
+   語意是：只標例外，不標正常。各種狀態在畫面上長這樣 ——
 
    | 判斷 | 畫面 |
    |---|---|
    | 偏貴 | 紅色徽章 + 左邊顯示合理價 |
    | 便宜 | 綠色徽章 + 右邊顯示合理價 |
    | 合理 | **只有價格數字**，沒徽章、合理價欄留白 |
+   | 不可信 + 合理 | 灰色 `?` 徽章，價格用 `.price.unknown`(**不是** `fair`) |
+   | 不可信 + 偏貴/便宜 | 淡化徽章帶 `?`(`偏貴?`)，價格不上色 |
    | 沒資料 | 價格顯示 `—` |
 
-   「合理」跟「沒資料」的差別**只在有沒有價格數字**。動 `statusBadge()` 或
-   `updateSide()` 時千萬別把這個區別弄不見了。實測 2026/09/08 夜盤 ATM±10 檔
+   「合理」跟「沒資料」的差別**只在有沒有價格數字**；「合理」跟「不可信+合理」的差別
+   在有沒有 `?` —— 後者不是正常判斷，是根本沒判斷出東西(見下面 F)。
+   動 `statusBadge()` 或 `updateSide()` 時千萬別把這些區別弄不見了。實測 2026/09/08 夜盤 ATM±10 檔
    42 格裡有 35 格是合理 —— 大部分時候市場定價本來就合理，隨便就標得出偏貴
    反而代表基準算錯了。
 8. **下面這幾個地方是踩過坑修好的，看起來多餘但不要「簡化」回去**：
    - `taifex_fetch.CLOCK_SKEW_TOLERANCE`：報價時間比本機快幾秒是時鐘沒對齊，
      不是跨午夜。少了這段容忍，差1秒就變成 age=86399，當下正在成交的那幾檔
      會被當成最陳舊的報價整批丟掉。
-   - `pricing_service` 的 `n_out_of_range += 1` 必須在 `db_baseline` 覆寫**之後**，
-     不然計數器會大於 `n_unreliable`，CLI 的 `n_tiny` 變負數。
+   - `ChainAnalysis.n_out_of_range` / `n_tiny` 是**從 `evals` 數出來的 property**，
+     不要改回計數器累加，CLI 也不要再用 `n_unreliable - n_out_of_range` 反推 `n_tiny`。
+     計數器版本踩過兩次坑：加的時機在 `db_baseline` 覆寫之前(`n_tiny` 變負數)、
+     減法反推漏掉重疊的檔(H)。`tiny_fair` 要在 `out_of_range` 覆寫 `reliable` **之前**抓。
+     兩者會重疊，相加大於 `n_unreliable` 是正常的。
    - `counts`(全鏈) vs `reliable_counts`(只算可信)：統計行一律用後者，
      不然表頭說「偏貴6檔」但表格裡只有2檔紅的。
    - `db.get_baseline_iv_batch()` 的 `trade_date >=` 下限 + `pricing_service` 的
@@ -140,14 +149,15 @@ python taifex_fetch.py        # 這個會實際連期交所
   `.gitignore` 擋掉 `*.db`(本機報價快照)、`.claude/settings.local.json`、`_*_tmp.py`。
   還**沒加 LICENSE** —— 公開 repo 沒授權條款等於「保留所有權利」，別人不能合法使用。
 
-## 下次接手先看這裡 (更新於 2026-09-12)
+## 下次接手先看這裡 (更新於 2026-09-14)
 
-**下一個日盤：2026-09-14(一) 08:45–13:45**，那才是這個工具真正該用的時段。
+**2026-09-14(一) 是修完之後第一個日盤(08:45–13:45)**，拿即時資料驗 A~H 修得對不對。
 
 ⚠ 2026-09-11 做過一次全面邏輯檢查，找到 8 個問題(3 個會實際誤標)。
-**2026-09-12 已修掉 A、B、C —— 三個紅的全部修完**，剩 5 個黃/綠的，
-見下面「下次要做：修剩下這 5 個邏輯問題」。
-離線自我測試那 5 支當時全過 —— 那些問題測試測不到，所以修的時候都補了對應斷言。
+**A、B、C(紅)2026-09-12 修完；F、G、H 2026-09-14 修完**，剩 D、E 兩個，
+都是期交所 API 沒給日期/時戳造成的，修不乾淨，見下面「剩下的邏輯問題」。
+原本那 5 支離線自我測試測不到這些問題，所以修的時候都補了對應斷言
+(F/G/H 的在新加的 `python pricing_service.py`)。
 
 起 server：
 
@@ -179,15 +189,16 @@ python serve_dashboard.py --min-volume 10 --max-age 600   # 想看乾淨訊號�
 
 - [ ] **「合理」要不要也給一個灰色徽章？** 現在是留白(見硬規則7)。留白的好處是
       4個真訊號不會被35個色塊淹掉；壞處是乍看像「沒算」。要改的話兩分鐘的事。
+      (F 加的灰色 `?` 只給「不可信」的檔，跟這題是兩件事 —— 真的合理仍然留白)
 - [ ] **加不加 LICENSE？** repo 是 public 但沒有授權條款。
 - [ ] **`_dbverify_tmp.py` 要留嗎？** 目前被 `.gitignore` 擋掉沒進 repo
       (它讀的 `_t.db` 也沒進去，推上去也跑不動)。要留跟我說。
 
-## 下次要做：修剩下這 5 個邏輯問題 (2026-09-11 全面檢查找到的)
+## 剩下的邏輯問題 (2026-09-11 全面檢查找到的)
 
 離線自我測試那 5 支當時全過，這些是「測試測不到、但會實際誤標」的問題。
-**A / B / C 三個紅的已於 2026-09-12 修完**(保留在下面當紀錄)，
-剩下 D~H 是黃綠的，其中 D 跟 E 都是「期交所API沒給日期/時戳」造成的，修不乾淨。
+**A / B / C 已於 2026-09-12 修完、F / G / H 已於 2026-09-14 修完**(保留在下面當紀錄)，
+剩下 D 跟 E，都是「期交所API沒給日期/時戳」造成的，修不乾淨。
 
 ### A. ~~`get_baseline_iv_batch()` 沒有時間下限~~ ✅ 已修 (2026-09-12)
 
@@ -293,36 +304,68 @@ API 沒給 bid/ask 的時戳，只能改成「mid 的 age 標成 None(未知)」
 `taifex_fetch.py:418` 只拿得到 HHMMSS，沒有日期：
 
 ```
-CTime=094500，現在 09/11 10:00        → age=900秒
-3天前 09:45 成交的僵滯報價 CTime 也是 094500 → age 一樣算成 900秒
+CTime=095500，現在 09/11 10:00        → age=300秒
+3天前 09:55 成交的僵滯報價 CTime 也是 095500 → age 一樣算成 300秒
 ```
 
-三天沒成交的僵滯報價會偽裝成「15分鐘前」，直接通過 `BASELINE_MAX_AGE` 進基準池。
+三天沒成交的僵滯報價會偽裝成「5分鐘前」，直接通過 `BASELINE_MAX_AGE` 進基準池。
+(G 把門檻收到 600 秒只是縮小命中機率，沒有修到這個)
 連假後第一天、以及流動性差的週選最容易中。
 API 沒給日期，修不乾淨 —— 只能靠別的訊號佐證(例如 `volume==0` 就不要信 CTime)。
 
-### F. 「不可信 + 合理」跟「真的合理」在畫面上完全一樣 🟡
+### F. ~~「不可信 + 合理」跟「真的合理」在畫面上完全一樣~~ ✅ 已修 (2026-09-14)
 
-`options_dashboard.html:600-606`：`status === "fair"` 時 `statusBadge()` 回空字串、
-`fairEl` 留白、`priceEl` 的 class 是 `fair`(`unreliable` 那個三元式算出來也是 `fair`)。
-所以 unreliable 的檔只有 tooltip 有差。
+**原本的問題**：`status === "fair"` 時 `statusBadge()` 回空字串、`fairEl` 留白、
+`priceEl` 的 class 是 `fair`(`unreliable` 那個三元式算出來也是 `fair`)，
+所以 unreliable 的檔只有 tooltip 有差。而這一格保證會出現：`black76_iv` 在
+`fair_price <= 0` 時 `deviation = 0.0` → `status = "fair"`；範圍外的深價內
+偏差也常常很小。硬規則7 是「只標例外」—— 這格是例外(沒判斷出東西)，卻被畫成正常。
 
-而 `black76_iv.py:187-188` 保證會產生這一格：`fair_price <= 0` → `deviation = 0.0`
-→ `status = "fair"`。深價外理論價 3e-35 那些，畫面上會呈現成一個正常的「合理」。
+**修法**(只動前端，後端本來就有送 `reliable`)：
+- `statusBadge()`：不可信時回灰色 `<span class="badge unknown">?</span>`
+- `updateSide()`：不可信的價格 class 用 `unknown`(次要文字色、不加粗)，不再借用 `fair`
+- 圖例加「? 無法判斷」
 
-硬規則7 的語意是「只標例外，不標正常」—— 這格其實是例外(根本沒判斷出東西)，
-卻被畫成正常。**這跟「合理要不要加灰徽章」是兩件事，這個是漏標。**
+**測試**：
+- `pricing_service.py` 測試3：確認後端真的會送出 `status=fair, reliable=False`
+  (合成資料 101 檔裡有 26 檔)。
+- 前端用 CLAUDE.md 環境那節的做法驗過五種狀態(抽出 `formatAge`/`sideTooltip`/
+  `statusBadge`/`updateSide`，最小 DOM stub 跑 node)。那支腳本沒進 repo ——
+  專案沒有 JS 測試架構，要重驗照做一次就好。
 
-### G. `BASELINE_MAX_AGE(900) > STALE_AGE(600)` 🟢
+### G. ~~`BASELINE_MAX_AGE(900) > STALE_AGE(600)`~~ ✅ 已修 (2026-09-14)
 
-畫面上標 `*` 淡化、跟使用者說「這筆不可信」的報價，仍然可以被拿去當整條鏈的基準
-(`pricing_service.py:47` vs `:50`)。兩個門檻的語意不一致，決定一個對齊。
+**原本的問題**：畫面上標 `*` 淡化、跟使用者說「這筆不可信」的報價，
+仍然可以被拿去當整條鏈的基準。
 
-### H. `n_tiny` 對重疊情況會少算 🟢
+**決定往嚴的方向對齊**：`BASELINE_MAX_AGE = STALE_AGE`(600 秒)，直接引用而不是另寫
+一個數字，之後調 `STALE_AGE` 會兩邊一起動。基準的殺傷力比單一檔大，不可以比
+「畫面上說可信」還寬鬆。README「基準IV本身也會被污染」那段的「15分鐘」一併改掉。
 
-`run_live_pipeline.py:301`：`n_tiny = n_unreliable - n_out_of_range`。
-一檔同時「合理價過小」又「在配適範圍外」時只算進 out_of_range，n_tiny 低報。
-不會變負數(out_of_range ⊆ unreliable 有保證)，只是數字不準。
+**測試**：`pricing_service.py` 測試4 —— 價平那檔 750 秒前、IV 0.40(舊門檻會收)，
+其他檔新鮮、IV 0.20 → 基準 ATM IV 必須是 0.20。
+
+### H. ~~`n_tiny` 對重疊情況會少算~~ ✅ 已修 (2026-09-14)
+
+**原本的問題**：CLI 用 `n_tiny = n_unreliable - n_out_of_range`，一檔同時
+「合理價過小」又「在配適範圍外」時只算進 out_of_range，n_tiny 低報。
+
+**修法**：
+- `StrikeEval` 加 `out_of_range` / `tiny_fair` 兩個欄位，不可信的原因分開記。
+  `tiny_fair = not verdict.reliable` 要在 `out_of_range` 覆寫 `reliable` 之前抓。
+- `ChainAnalysis.n_out_of_range` 從計數器改成 property、新增 `n_tiny` property，
+  都直接從 `evals` 數(順便讓「計數器加的時機」那個舊坑不可能再發生)。
+- CLI 改印 `res.n_tiny`，註明兩行數字相加可以大於 `n_unreliable`。
+
+**測試**：`pricing_service.py` 測試1、2(合成資料 47300±25000、無曲線)：
+
+```
+不可信56  範圍外56  合理價過小32  重疊32
+舊算法 n_tiny = 56 - 56 = 0      ← 32 檔全漏
+加 DB 5日均覆寫全部履約價 → 範圍外0、合理價過小32 = 不可信32
+```
+
+另外斷言「不可信 ⇔ 兩個原因至少一個成立」，不會出現說不出原因的不可信檔。
 
 ## 下次要做：部署
 

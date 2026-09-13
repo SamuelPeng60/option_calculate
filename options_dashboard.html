@@ -190,11 +190,16 @@
   .badge.cheap { background: var(--green-bg); color: var(--green); }
   /* 偏差百分比失去意義的合約(深價外/基準是外插來的)，標記但不要當成可用訊號 */
   .badge.unreliable { opacity: 0.45; }
+  /* 「算不出有意義的判斷」。留白是留給「合理」的，這一格不是合理，是沒判斷出東西 ——
+     不標的話它跟真的合理在畫面上一模一樣，只有tooltip有差(等於漏標) */
+  .badge.unknown { background: var(--bg-chip); color: var(--text-muted); }
 
   .price { font-weight: 600; }
   .price.expensive { color: var(--red); }
   .price.cheap { color: var(--green); }
   .price.fair { color: var(--text-primary); }
+  /* 跟 .fair 的差別要看得出來(不是正常判斷)，跟 .na 的差別是它還有價格數字 */
+  .price.unknown { color: var(--text-secondary); font-weight: 400; }
   .price.na { color: var(--text-muted); font-weight: 400; }
   /* 報價超過10分鐘：那個價格可能是幾小時前成交的，淡化提醒 */
   .price.stale { opacity: 0.5; }
@@ -286,6 +291,7 @@
     <span><span class="sw" style="background:var(--red)"></span>偏貴</span>
     <span><span class="sw" style="background:var(--green)"></span>便宜</span>
     <span><span class="sw" style="background:var(--text-primary)"></span>合理</span>
+    <span><span class="sw" style="background:var(--bg-chip);border:1px solid var(--border-strong)"></span>? 無法判斷</span>
     <span style="margin-left:auto">每 60 秒自動更新</span>
   </div>
 
@@ -530,11 +536,17 @@ function renderTicker(u) {
   document.getElementById("lastUpdated").textContent = "最後更新 " + u.updatedAt;
 }
 
+/* 三種正常判斷只標例外：偏貴紅、便宜綠、合理留白(見 CLAUDE.md 硬規則7)。
+   第四種是「不可信 + 合理」—— 那不是合理，是根本沒判斷出東西：
+   黑76 對深價外會算出 3e-35 這種理論價，evaluate_option() 遇到 fair_price<=0
+   就把 deviation 設成 0.0，於是 status 保證是 "fair"。
+   它以前跟真的合理長得一模一樣(只有tooltip有差)，那是漏標不是留白。 */
 function statusBadge(status, unreliable) {
   const cls = unreliable ? " unreliable" : "";
   const mark = unreliable ? "?" : "";
   if (status === "expensive") return `<span class="badge expensive${cls}">偏貴${mark}</span>`;
   if (status === "cheap") return `<span class="badge cheap${cls}">便宜${mark}</span>`;
+  if (unreliable) return `<span class="badge unknown">?</span>`;
   return "";
 }
 
@@ -601,8 +613,9 @@ function updateSide(el, side, prefix) {
   fairEl.textContent = side.status !== "fair" ? `合理 ${side.fairPrice}` : "";
   badgeEl.innerHTML = statusBadge(side.status, unreliable);
   priceEl.textContent = side.price;
-  // 不可信的那幾檔不上色，避免深價外的假訊號看起來跟真訊號一樣醒目
-  priceEl.className = "price " + (unreliable ? "fair" : side.status) +
+  // 不可信的那幾檔不上色，避免深價外的假訊號看起來跟真訊號一樣醒目。
+  // 但也不能套 "fair" —— 那會讓「沒判斷出東西」長得跟「判斷結果是合理」一樣。
+  priceEl.className = "price " + (unreliable ? "unknown" : side.status) +
     (side.stale ? " stale" : "");
   priceEl.title = sideTooltip(side);
 }
