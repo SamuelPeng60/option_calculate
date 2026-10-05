@@ -29,7 +29,7 @@ taifex_fetch.py    black76_iv.py       iv_skew.py      db.py
 | `pricing_service.py` | **計算核心** `analyze_chain()`，不印任何字、只回 `ChainAnalysis` |
 | `run_live_pipeline.py` | CLI，只負責把 `ChainAnalysis` 印成表格 + 寫DB |
 | `serve_dashboard.py` | 網頁後端，`/api/expiries`、`/api/quotes`、`/api/health` |
-| `options_dashboard.html` | 前端，60秒自動更新；「顯示範圍」選單 ±10/±20/全部(`window`=10/20/100，存 localStorage `txo_dashboard_window`) |
+| `options_dashboard.html` | 前端，60秒自動更新；「顯示範圍」選單 ±10/±20/全部(`window`=10/20/100，存 localStorage `txo_dashboard_window`)；版面與欄位見「畫面版面」 |
 | `taifex_fetch.py` | 期交所 mis API + 歷史回補；到期別代碼解析(`parse_expiry_code` / `ContractMonth`)；剩餘時間T(`years_to_settlement`，錨在到期日09:30結算) |
 | `black76_iv.py` | 定價、反推IV、`evaluate_option()` 貴賤判斷 |
 | `iv_skew.py` | 波動率偏斜曲線配適(消除skew假訊號) |
@@ -137,6 +137,42 @@ python taifex_fetch.py        # 這個會實際連期交所
      沒有它就只能拿履約價當F，反推出來的IV是假的 —— 而那批數字會被
      `analyze_chain()` 當成最高優先序的基準靜默採用。
 
+## 畫面版面 (2026-10-05 調整)
+
+由上到下：
+
+```
+台指期點數 ｜ 最後更新 + [↻ 刷新]
+#errorNote   紅色「更新失敗」(有才出現)
+#warnNote    黃色警語：非交易時段 / Call或Put某邊算不出來 / 寫入資料庫失敗(有才出現)
+月選/週選、顯示範圍、到期日選單
+顏色說明(.legend) ｜ 右邊 #expiryInfo：到期日(剩N天) + 盤別
+表格
+#metaNote    基準來源、偏貴/合理/便宜統計、免責聲明、每60秒自動更新
+```
+
+- **警語跟顏色說明一律放表格上面**，不要搬回下面 ——「全部」會有一百多列，
+  放底下要捲到最底才看得到。`renderMeta()` 把警語拆到 `#warnNote`、
+  到期/盤別拆到 `#expiryInfo`，`#metaNote` 只留說明性的資訊。
+  (基準來源那行自帶的 ⚠ 例如「資料庫5日均過舊」仍跟著基準說明留在下面)
+- **表格 9 欄**：`成交 | 量 | 合理價 | 市場價 | 履約價 | 市場價 | 合理價 | 量 | 成交`
+  (Call 在左、Put 在右，鏡射排列)。
+  - **量**：`volume`，0 口的淡化(`.cell-vol.zero`)。
+  - **成交**：最後成交時間 `quoteTime`，畫面只顯示 `HH:MM`，秒數跟「幾分前」在 title；
+    超過10分鐘跟價格一樣淡化。期交所只給時分秒沒給日期(見下面 E)，
+    很久沒成交的檔這個時間可能是前幾天的。
+  - **委買/委賣**：疊在市場價正下方的小字(`.bidask`，`945 / 960`)，沒掛單的那邊畫 `—`。
+    刻意不做成獨立欄位 —— 兩邊各加2欄在 720px 寬度擠不下。
+- **`bid` / `ask` 只是帶給畫面顯示**：`StrikeEval.bid/ask` 從 `RawLiveQuote` 原樣帶過來，
+  不參與任何判斷。夜盤常看到成交價落在委買委賣區間外(實測 50300 Call 成交 845、
+  委買委賣 750/760)，那是成交價陳舊，不是程式算錯。
+- **刷新按鈕**：跟60秒自動更新走同一個 `tick()`，只換表格裡的值、不重載頁面。
+  手動刷新帶 `?fresh=1`，後端把快取 TTL 壓到 `MANUAL_REFRESH_MIN_TTL`(3秒) ——
+  不然按了拿到的還是20秒內的同一份。**3秒下限不要拿掉**，那是擋連點連打期交所的。
+  自動更新不帶 `fresh`，仍走原本的20秒快取。
+- **「最後更新」顯示的是後端這次抓資料的時間**(`meta.serverTime`)，不是台指期最後成交時間
+  (`underlying.updatedAt`，移到 title)。後者在台指期沒成交時不會動，按了刷新看起來像沒反應。
+
 ## 環境與工具注意事項
 
 - Windows 11 / Python 3.14 / 已裝 scipy、pandas、requests、pymysql。
@@ -149,6 +185,7 @@ python taifex_fetch.py        # 這個會實際連期交所
 - 前端 JS 改完可以用 `node --check` 驗語法；要驗渲染流程可以抽出 `<script>` 內容，
   用最小 DOM stub 在 node 裡跑一遍(比開瀏覽器快)。
 - 期交所 API 有速率考量：後端已有 TTL 快取(報價20秒/到期別5分鐘)，debug 時不要繞過它連打。
+  (`?fresh=1` 是給畫面上的刷新按鈕用的，仍有3秒下限，不要拿來寫迴圈)
 - **版控**：https://github.com/SamuelPeng60/option_calculate (public，branch `main`)。
   `.gitignore` 擋掉 `*.db`(本機報價快照)、`.claude/settings.local.json`、`_*_tmp.py`。
   還**沒加 LICENSE** —— 公開 repo 沒授權條款等於「保留所有權利」，別人不能合法使用。

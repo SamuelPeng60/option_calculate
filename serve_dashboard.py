@@ -71,6 +71,7 @@ HTML_FILE = HERE / "options_dashboard.html"
 
 MONTHS_TTL = 300.0     # 掛牌到期別清單很少變，5分鐘撈一次就夠
 DEFAULT_QUOTES_TTL = 20.0
+MANUAL_REFRESH_MIN_TTL = 3.0   # 手動刷新時快取最短還是擋這麼久(秒)
 
 
 # ---------------------------------------------------------------------------
@@ -189,7 +190,11 @@ def _side_payload(e) -> dict:
         "iv": round(e.implied_vol, 4),
         "baselineIv": round(e.baseline_iv, 4),
         "volume": e.volume,
+        "bid": e.bid if e.bid > 0 else None,     # None=沒人掛單
+        "ask": e.ask if e.ask > 0 else None,
         "priceSource": e.price_source,   # last=成交價 / mid=買賣中價
+        # 最後「成交」時間。期交所沒給就送 None，不要讓 _hhmmss 補零變成 00:00:00
+        "quoteTime": _hhmmss(e.quote_time) if (e.quote_time or "").strip() else None,
         "ageSec": e.age_sec,
         "stale": e.stale,                # 報價超過10分鐘，IV參考價值低
         "reliable": e.reliable,          # False=偏差百分比失去意義，不要當訊號看
@@ -424,8 +429,13 @@ class Handler(BaseHTTPRequestHandler):
                 window = max(0, min(int(arg("window", str(CFG.window))), 100))
                 key = ("quotes", current_session(), etype, code, window,
                        CFG.min_volume, CFG.max_age_sec)
+                # 使用者手動按「刷新」(?fresh=1)：快取只擋 MANUAL_REFRESH_MIN_TTL 秒，
+                # 不然按了拿到的還是20秒內的同一份。留一個下限是為了連點不會連打期交所。
+                ttl = CFG.quotes_ttl
+                if arg("fresh") == "1":
+                    ttl = min(ttl, MANUAL_REFRESH_MIN_TTL)
                 data = _cache.get_or_compute(
-                    key, CFG.quotes_ttl,
+                    key, ttl,
                     lambda: quotes_payload(etype, code, window),
                 )
                 self._send_json(data)

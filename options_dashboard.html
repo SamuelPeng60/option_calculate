@@ -156,7 +156,7 @@
   }
   .chain-header {
     display: grid;
-    grid-template-columns: 1fr 1fr 76px 1fr 1fr;
+    grid-template-columns: 40px 44px 1fr 1fr 76px 1fr 1fr 44px 40px;
     padding: 10px 12px;
     font-size: 11px;
     color: var(--text-muted);
@@ -168,7 +168,7 @@
 
   .chain-row {
     display: grid;
-    grid-template-columns: 1fr 1fr 76px 1fr 1fr;
+    grid-template-columns: 40px 44px 1fr 1fr 76px 1fr 1fr 44px 40px;
     align-items: center;
     padding: 9px 12px;
     border-bottom: 1px solid var(--border);
@@ -184,6 +184,32 @@
   .cell-fair { font-size: 10px; color: var(--text-muted); }
   .call-fair { text-align: right; }
   .put-fair { text-align: left; }
+
+  /* 成交量放最外側：0 口的檔一眼看得出來，那種報價的判斷本來就不太能信 */
+  .cell-vol { font-size: 11px; color: var(--text-secondary); }
+  .cell-vol.zero { color: var(--text-muted); opacity: 0.6; }
+  .call-vol { text-align: left; }
+  .put-vol { text-align: right; }
+  /* 最後成交時間(HH:MM，完整到秒放在 title)。超過10分鐘跟價格一樣淡化 */
+  .cell-time { font-size: 10px; color: var(--text-secondary); }
+  .cell-time.stale { opacity: 0.5; }
+  .call-time { text-align: left; }
+  .put-time { text-align: right; }
+
+  /* ---- 手動刷新按鈕 ---- */
+  .refresh-btn {
+    margin-top: 6px;
+    background: var(--bg-chip);
+    border: 1px solid var(--border-strong);
+    color: var(--text-secondary);
+    font-family: var(--font-sans);
+    font-size: 12px;
+    padding: 5px 12px;
+    border-radius: 8px;
+    cursor: pointer;
+  }
+  .refresh-btn:hover { color: var(--text-primary); border-color: var(--accent); }
+  .refresh-btn:disabled { opacity: 0.5; cursor: default; }
 
   .cell-status { display: flex; align-items: center; gap: 6px; }
   .call-status { justify-content: flex-end; }
@@ -203,6 +229,12 @@
   /* 「算不出有意義的判斷」。留白是留給「合理」的，這一格不是合理，是沒判斷出東西 ——
      不標的話它跟真的合理在畫面上一模一樣，只有tooltip有差(等於漏標) */
   .badge.unknown { background: var(--bg-chip); color: var(--text-muted); }
+
+  /* 市場價下面一行小字：委買/委賣最佳一檔 */
+  .price-box { display: flex; flex-direction: column; line-height: 1.35; }
+  .call-status .price-box { align-items: flex-end; }
+  .put-status .price-box { align-items: flex-start; }
+  .bidask { font-size: 10px; color: var(--text-muted); white-space: nowrap; }
 
   .price { font-weight: 600; }
   .price.expensive { color: var(--red); }
@@ -224,13 +256,17 @@
   .legend {
     display: flex;
     gap: 16px;
-    margin-top: 12px;
+    margin-bottom: 10px;
     font-size: 11px;
     color: var(--text-muted);
     align-items: center;
   }
   .legend span { display: flex; align-items: center; gap: 5px; }
   .legend .sw { width: 8px; height: 8px; border-radius: 2px; }
+  /* 顏色說明右邊：到期日 + 盤別。窄螢幕擠不下就整塊換到下一行 */
+  .legend { flex-wrap: wrap; row-gap: 6px; }
+  .legend .legend-info { margin-left: auto; gap: 12px; white-space: nowrap; }
+  .legend b { color: var(--text-secondary); font-weight: 600; margin-right: 4px; }
 
   .loading-note {
     text-align: center;
@@ -248,10 +284,13 @@
   }
   .meta b { color: var(--text-secondary); font-weight: 600; }
   .meta .warn { color: var(--accent); }
+  /* 警語放在表格上面：放底下的話「全部」一百多列時要捲到最底才看得到 */
+  .meta.top-warn { margin-top: 0; margin-bottom: 12px; }
+  .meta.top-warn:empty { display: none; }
 
   .error-note {
     display: none;
-    margin-top: 12px;
+    margin-bottom: 12px;
     padding: 10px 12px;
     border-radius: 8px;
     border: 1px solid var(--red);
@@ -273,9 +312,13 @@
       </div>
     </div>
     <div class="ticker-updated">
-      <span class="dot"></span><span id="lastUpdated">--</span>
+      <div><span class="dot"></span><span id="lastUpdated">--</span></div>
+      <button class="refresh-btn" id="refreshBtn" title="只重抓表格裡的值，不重新載入整頁">↻ 刷新</button>
     </div>
   </div>
+
+  <div class="error-note" id="errorNote"></div>
+  <div class="meta top-warn" id="warnNote"></div>
 
   <div class="controls">
     <div class="segment" id="expiryTypeSegment">
@@ -293,28 +336,31 @@
 
   <div class="expiry-list" id="expiryList"></div>
 
+  <div class="legend">
+    <span><span class="sw" style="background:var(--red)"></span>偏貴</span>
+    <span><span class="sw" style="background:var(--green)"></span>便宜</span>
+    <span><span class="sw" style="background:var(--text-primary)"></span>合理</span>
+    <span><span class="sw" style="background:var(--bg-chip);border:1px solid var(--border-strong)"></span>? 無法判斷</span>
+    <span class="legend-info" id="expiryInfo"></span>
+  </div>
+
   <div class="chain-card">
     <div class="chain-header">
+      <div class="call-time">成交</div>
+      <div class="call-vol">量</div>
       <div class="call-label">Call 合理價</div>
-      <div class="call-label">Call 市場價</div>
+      <div class="call-label" title="下方小字：委買 / 委賣">Call 市場價<br>委買/委賣</div>
       <div class="strike-label">履約價</div>
-      <div class="put-label">Put 市場價</div>
+      <div class="put-label" title="下方小字：委買 / 委賣">Put 市場價<br>委買/委賣</div>
       <div class="put-label">Put 合理價</div>
+      <div class="put-vol">量</div>
+      <div class="put-time">成交</div>
     </div>
     <div id="chainBody">
       <div class="loading-note">載入中…</div>
     </div>
   </div>
 
-  <div class="legend">
-    <span><span class="sw" style="background:var(--red)"></span>偏貴</span>
-    <span><span class="sw" style="background:var(--green)"></span>便宜</span>
-    <span><span class="sw" style="background:var(--text-primary)"></span>合理</span>
-    <span><span class="sw" style="background:var(--bg-chip);border:1px solid var(--border-strong)"></span>? 無法判斷</span>
-    <span style="margin-left:auto">每 60 秒自動更新</span>
-  </div>
-
-  <div class="error-note" id="errorNote"></div>
   <div class="meta" id="metaNote"></div>
 
 <script>
@@ -366,7 +412,9 @@ async function fetchChainData(expiryType, expiryId) {
   const q = expiryId ? `&expiry=${encodeURIComponent(expiryId)}` : "";
   // 一律帶 window：不帶的話吃 server 的 --window 預設值(10)，畫面上就調不了範圍 ——
   // 實測 202610 Call 掛到 54500，預設只看得到 45000~48000
-  return await getJson(`/api/quotes?type=${expiryType}${q}&window=${currentWindow}`, "抓報價資料");
+  // forceFresh：手動按刷新時請後端不要回20秒內的快取(後端仍有3秒下限)
+  const fresh = forceFresh ? "&fresh=1" : "";
+  return await getJson(`/api/quotes?type=${expiryType}${q}&window=${currentWindow}${fresh}`, "抓報價資料");
 }
 
 /* ---- 以下都是模擬資料產生器，之後接真後端可以整段刪除 ---- */
@@ -472,7 +520,8 @@ function loadSavedSelection() {
 const saved = loadSavedSelection();
 let currentExpiryType = saved ? saved.expiryType : "month";
 let currentExpiryId = null;
-let expiryListLoadedAt = 0;   // 到期別清單上次抓成功的時間(見下面的 tick)
+let forceFresh = false;       // 手動刷新進行中才是 true
+let expiryListLoadedAt = 0;  // 到期別清單上次抓成功的時間(見下面的 tick)
 
 // 讓月選/週選按鈕的active樣式也對齊restore後的狀態
 document.querySelectorAll("#expiryTypeSegment button").forEach((b) => {
@@ -522,7 +571,7 @@ async function loadChainData() {
   const scrollPos = window.scrollY; // 重畫表格前先記住目前捲到哪
   try {
     const data = await fetchChainData(currentExpiryType, currentExpiryId);
-    renderTicker(data.underlying);
+    renderTicker(data.underlying, data.meta);
     renderChain(data);
     renderMeta(data.meta);
     showError(null);
@@ -547,14 +596,18 @@ function showError(msg) {
   }
 }
 
-function renderTicker(u) {
+function renderTicker(u, meta) {
   document.getElementById("underlyingPrice").textContent = u.price.toLocaleString();
   const change = u.price - u.prevClose;
   const changeEl = document.getElementById("underlyingChange");
   const sign = change >= 0 ? "▲" : "▼";
   changeEl.textContent = `${sign} ${Math.abs(change).toFixed(0)}`;
   changeEl.className = "ticker-change " + (change >= 0 ? "up" : "down");
-  document.getElementById("lastUpdated").textContent = "最後更新 " + u.updatedAt;
+  // 「最後更新」顯示後端這次抓資料的時間，不是台指期最後成交時間 ——
+  // 後者在台指期沒成交時不會動，按了刷新看起來就像沒反應
+  const updatedEl = document.getElementById("lastUpdated");
+  updatedEl.textContent = "最後更新 " + ((meta && meta.serverTime) || u.updatedAt);
+  updatedEl.title = "台指期最後成交 " + u.updatedAt;
 }
 
 /* 三種正常判斷只標例外：偏貴紅、便宜綠、合理留白(見 CLAUDE.md 硬規則7)。
@@ -579,17 +632,27 @@ function createRow(strike) {
   el.className = "chain-row";
   el.dataset.strike = strike;
   el.innerHTML = `
+    <div class="cell-time call-time" data-role="callTime"></div>
+    <div class="cell-vol call-vol" data-role="callVol"></div>
     <div class="cell-fair call-fair" data-role="callFair"></div>
     <div class="cell-status call-status">
       <span data-role="callBadge"></span>
-      <span class="price" data-role="callPrice"></span>
+      <span class="price-box">
+        <span class="price" data-role="callPrice"></span>
+        <span class="bidask" data-role="callBidAsk"></span>
+      </span>
     </div>
     <div class="strike">${strike}</div>
     <div class="cell-status put-status">
-      <span class="price" data-role="putPrice"></span>
+      <span class="price-box">
+        <span class="price" data-role="putPrice"></span>
+        <span class="bidask" data-role="putBidAsk"></span>
+      </span>
       <span data-role="putBadge"></span>
     </div>
     <div class="cell-fair put-fair" data-role="putFair"></div>
+    <div class="cell-vol put-vol" data-role="putVol"></div>
+    <div class="cell-time put-time" data-role="putTime"></div>
   `;
   return el;
 }
@@ -606,6 +669,7 @@ function sideTooltip(side) {
   const lines = [
     `即時IV ${side.iv}　基準IV ${side.baselineIv}`,
     `合理價 ${side.fairPrice}　偏差 ${side.deviationPct > 0 ? "+" : ""}${side.deviationPct}%`,
+    `委買 ${side.bid ?? "—"}　委賣 ${side.ask ?? "—"}`,
     `成交量 ${side.volume}　報價 ${formatAge(side.ageSec)}` +
       (side.priceSource === "mid" ? "(買賣中價，今日尚無成交)" : ""),
   ];
@@ -620,8 +684,16 @@ function updateSide(el, side, prefix) {
   const fairEl = el.querySelector(`[data-role="${prefix}Fair"]`);
   const badgeEl = el.querySelector(`[data-role="${prefix}Badge"]`);
   const priceEl = el.querySelector(`[data-role="${prefix}Price"]`);
+  const volEl = el.querySelector(`[data-role="${prefix}Vol"]`);
+
+  const timeEl = el.querySelector(`[data-role="${prefix}Time"]`);
+  const bidAskEl = el.querySelector(`[data-role="${prefix}BidAsk"]`);
 
   if (!side) {
+    bidAskEl.textContent = "";
+    timeEl.textContent = "";
+    timeEl.removeAttribute("title");
+    volEl.textContent = "";
     fairEl.textContent = "";
     badgeEl.innerHTML = "";
     priceEl.textContent = "—";
@@ -631,6 +703,17 @@ function updateSide(el, side, prefix) {
   }
 
   const unreliable = side.reliable === false;
+  // 沒人掛單的那一邊畫「—」，不要印成 0
+  const px = (v) => (v === null || v === undefined ? "—" : v);
+  bidAskEl.textContent = `${px(side.bid)} / ${px(side.ask)}`;
+  const hasVol = side.volume !== null && side.volume !== undefined;
+  volEl.textContent = hasVol ? Number(side.volume).toLocaleString() : "";
+  volEl.classList.toggle("zero", hasVol && Number(side.volume) === 0);
+  // 期交所只給時分秒、沒給日期：很久沒成交的檔，這個時間可能是前幾天的
+  timeEl.textContent = side.quoteTime ? side.quoteTime.slice(0, 5) : "";
+  timeEl.classList.toggle("stale", Boolean(side.stale));
+  if (side.quoteTime) timeEl.title = `最後成交 ${side.quoteTime}（${formatAge(side.ageSec)}）`;
+  else timeEl.removeAttribute("title");
   fairEl.textContent = side.status !== "fair" ? `合理 ${side.fairPrice}` : "";
   badgeEl.innerHTML = statusBadge(side.status, unreliable);
   priceEl.textContent = side.price;
@@ -691,14 +774,23 @@ function escapeHtml(s) {
 
 function renderMeta(meta) {
   const el = document.getElementById("metaNote");
-  if (!meta) { el.innerHTML = ""; return; }
+  const warnEl = document.getElementById("warnNote");
+  if (!meta) {
+    el.innerHTML = ""; warnEl.innerHTML = "";
+    document.getElementById("expiryInfo").innerHTML = "";
+    return;
+  }
 
+  // 到期日跟盤別放在表格上面、顏色說明的右邊(#expiryInfo)
   const parts = [];
   const ex = meta.expiry;
-  if (ex) parts.push(`<b>到期</b> ${ex.date}（剩 ${ex.days} 天）`);
-  parts.push(`<b>盤別</b> ${meta.session === "night" ? "夜盤" : "日盤"}`);
+  if (ex) parts.push(`<span><b>到期</b>${ex.date}（剩 ${ex.days} 天）</span>`);
+  parts.push(`<span><b>盤別</b>${meta.session === "night" ? "夜盤" : "日盤"}</span>`);
+  document.getElementById("expiryInfo").innerHTML = parts.join("");
+  // 警語一律收到表格上面的 warnNote，這裡只留說明性的資訊
+  const problems = [];
   if (meta.marketOpen === false) {
-    parts.push(`<span class="warn">⚠ 非交易時段，顯示的是上一盤最後報價</span>`);
+    problems.push(`<span class="warn">⚠ 非交易時段，顯示的是上一盤最後報價</span>`);
   }
 
   const line2 = [];
@@ -717,7 +809,6 @@ function renderMeta(meta) {
   // 後端算得出東西、但過程中有一邊出事(例如夜盤週選Put整排沒報價)、
   // 或寫資料庫失敗時，errors 會帶回來。以前這些完全沒印，
   // Put欄位就只是靜靜地全部顯示「—」，畫面上沒有任何字說明為什麼。
-  const problems = [];
   if (meta.errors) {
     const NAME = { C: "Call", P: "Put", db: "寫入資料庫" };
     Object.keys(meta.errors).forEach((k) => {
@@ -729,7 +820,9 @@ function renderMeta(meta) {
   const notes = ["※ 判斷僅供參考，不構成投資建議；淡色=報價超過10分鐘，? =偏差百分比失去意義"];
   if (meta.serverTime) notes.push(`後端更新於 ${meta.serverTime}`);
 
-  el.innerHTML = [parts.join("　"), ...line2, ...problems, notes.join("　")]
+  warnEl.innerHTML = problems.map((s) => `<div>${s}</div>`).join("");
+  notes.push("每 60 秒自動更新");
+  el.innerHTML = [...line2, notes.join("　")]
     .map((s) => `<div>${s}</div>`).join("");
 }
 
@@ -798,6 +891,22 @@ async function tick() {
   }
   await loadChainData();
 }
+
+/* 手動刷新：跟60秒自動更新走同一個 tick()，只換表格裡的值、不重載頁面。
+   帶 fresh=1 請後端略過20秒快取(仍有3秒下限，連點不會連打期交所) */
+const refreshBtn = document.getElementById("refreshBtn");
+refreshBtn.onclick = async () => {
+  refreshBtn.disabled = true;
+  refreshBtn.textContent = "更新中…";
+  forceFresh = true;
+  try {
+    await tick();
+  } finally {
+    forceFresh = false;
+    refreshBtn.disabled = false;
+    refreshBtn.textContent = "↻ 刷新";
+  }
+};
 
 /* 初始載入 + 每60秒自動更新 */
 refreshAll();

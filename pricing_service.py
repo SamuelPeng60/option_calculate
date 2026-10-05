@@ -107,6 +107,9 @@ class StrikeEval:
     # 原本沒記，CLI 只能用 n_unreliable - n_out_of_range 反推 n_tiny，
     # 重疊的那幾檔只算進 out_of_range，n_tiny 就低報了。
     out_of_range: bool = False   # 基準是外插來的/離價平太遠，這一檔的基準本身不能用
+    # 委買/委賣最佳一檔，純粹帶給畫面顯示，不參與判斷。0 = 沒掛單
+    bid: float = 0.0
+    ask: float = 0.0
     tiny_fair: bool = False      # 合理價過小(深度價外)，百分比偏差失去意義
 
     @property
@@ -431,6 +434,8 @@ def analyze_chain(
             reliable=verdict.reliable,
             out_of_range=out_of_range,
             tiny_fair=tiny_fair,
+            bid=q.bid,
+            ask=q.ask,
         ))
 
     return result
