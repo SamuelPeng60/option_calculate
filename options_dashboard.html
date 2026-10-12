@@ -32,7 +32,7 @@
     color: var(--text-primary);
     font-family: var(--font-sans);
     padding: 20px;
-    max-width: 720px;
+    max-width: 900px;
   }
 
   /* ---- 頂部台指期即時點數 ---- */
@@ -147,6 +147,28 @@
   .wk-tag.fri { background: rgba(176, 140, 255, 0.16); color: #B08CFF; }
   .wk-tag.other { background: var(--bg-chip); color: var(--text-muted); }
 
+  /* ---- 鎖定區：台指期點數到表頭(含置頂區)，往下捲時固定在畫面最上面 ----
+     表格因此拆成兩張卡：表頭+置頂區(.chain-top)在鎖定區裡，其餘的列(.chain-bottom)在外面。
+     不能包在同一張 .chain-card 裡 —— 它的 overflow:hidden 會讓 sticky 失效。 */
+  .sticky-top {
+    position: sticky;
+    top: 0;
+    z-index: 10;
+    background: var(--bg-page);
+    /* 把 body 上方的 20px 留白收進來，不然鎖定後表格的列會從那條縫露出來 */
+    margin-top: -20px;
+    padding-top: 20px;
+  }
+  .chain-card.chain-top { border-bottom: none; border-radius: 12px 12px 0 0; }
+  .chain-card.chain-bottom { border-top: none; border-radius: 0 0 12px 12px; }
+  /* 置頂太多列時自己捲，不要把整個畫面吃光 */
+  #pinnedBody { max-height: 35vh; overflow-y: auto; }
+  /* 畫面太矮(手機橫放)時不鎖，不然鎖定區就佔滿整個螢幕 */
+  @media (max-height: 560px) {
+    .sticky-top { position: static; }
+    #pinnedBody { max-height: none; }
+  }
+
   /* ---- 選擇權鏈表格 ---- */
   .chain-card {
     background: var(--bg-card);
@@ -156,7 +178,8 @@
   }
   .chain-header {
     display: grid;
-    grid-template-columns: 40px 44px 1fr 1fr 76px 1fr 1fr 44px 40px;
+    grid-template-columns: 34px 44px 48px 1fr 1.25fr 80px 1.25fr 1fr 48px 44px;
+    column-gap: 10px;
     padding: 10px 12px;
     font-size: 11px;
     color: var(--text-muted);
@@ -168,7 +191,8 @@
 
   .chain-row {
     display: grid;
-    grid-template-columns: 40px 44px 1fr 1fr 76px 1fr 1fr 44px 40px;
+    grid-template-columns: 34px 44px 48px 1fr 1.25fr 80px 1.25fr 1fr 48px 44px;
+    column-gap: 10px;
     align-items: center;
     padding: 9px 12px;
     border-bottom: 1px solid var(--border);
@@ -180,8 +204,46 @@
     background: rgba(240, 180, 41, 0.06);
     box-shadow: inset 0 1px 0 var(--accent-dim), inset 0 -1px 0 var(--accent-dim);
   }
+  /* ---- 置頂區：點最左邊那一格會複製一列上來，下面的表格原封不動 ---- */
+  #pinnedBody { border-bottom: 4px solid var(--accent); }
+  #pinnedBody:empty { display: none; }
+  /* 拖曳、點兩下取消都靠按住/連點，不關掉的話會變成反白文字(手機是跳出選字選單) */
+  #pinnedBody .chain-row {
+    background: var(--bg-chip);
+    cursor: grab;
+    user-select: none;
+    -webkit-user-select: none;
+    -webkit-touch-callout: none;
+    touch-action: manipulation;   /* 關掉手機的「點兩下放大」，不然搶走點兩下 */
+  }
+  #pinnedBody .chain-row.dragging {
+    background: rgba(240, 180, 41, 0.14);
+    box-shadow: inset 0 0 0 1px var(--accent);
+    cursor: grabbing;
+  }
+  /* 最左邊的置頂格：平常是空的，點一下出現圖釘。滑鼠移上去先淡淡顯示，才知道這裡能點 */
+  .pin-btn {
+    border: none;
+    background: transparent;
+    padding: 0;
+    width: 100%;
+    height: 26px;
+    font-size: 13px;
+    line-height: 1;
+    cursor: pointer;
+    touch-action: manipulation;
+  }
+  .pin-btn::before { content: "\1F4CC"; opacity: 0; }
+  .pin-btn:hover::before { opacity: 0.35; }
+  .chain-row.is-pinned .pin-btn::before,
+  #pinnedBody .pin-btn::before { opacity: 1; }
+  .pin-hint { font-size: 11px; color: var(--text-muted); margin: -4px 0 10px; }
 
-  .cell-fair { font-size: 10px; color: var(--text-muted); }
+  .cell-fair { font-size: 10px; color: var(--text-muted); white-space: nowrap; line-height: 1.5; }
+  /* 合理價下面那行：到下個交易日同一時間預估少幾點(台指期跟IV不變)。
+     每一檔都有，所以顏色比「合理 xxx」亮一階；報價陳舊/不可信的跟價格一樣淡化 */
+  .decay { color: var(--text-secondary); }
+  .decay.dim { opacity: 0.5; }
   .call-fair { text-align: right; }
   .put-fair { text-align: left; }
 
@@ -195,6 +257,15 @@
   .cell-time.stale { opacity: 0.5; }
   .call-time { text-align: left; }
   .put-time { text-align: right; }
+
+  /* 視窗不夠寬時間距收回來：徽章不折行之後，深價內那幾列(五位數價格)會撐出卡片外 */
+  @media (max-width: 860px) {
+    .chain-header, .chain-row {
+      grid-template-columns: 28px 40px 40px 1fr 1.25fr 64px 1.25fr 1fr 40px 40px;
+      column-gap: 5px;
+    }
+    .cell-status { gap: 5px; }
+  }
 
   /* ---- 手動刷新按鈕 ---- */
   .refresh-btn {
@@ -210,12 +281,16 @@
   }
   .refresh-btn:hover { color: var(--text-primary); border-color: var(--accent); }
   .refresh-btn:disabled { opacity: 0.5; cursor: default; }
+  .refresh-btn + .refresh-btn { margin-left: 6px; }
 
-  .cell-status { display: flex; align-items: center; gap: 6px; }
+  .cell-status { display: flex; align-items: center; gap: 8px; }
   .call-status { justify-content: flex-end; }
   .put-status { justify-content: flex-start; }
 
   .badge {
+    /* 「偏貴」「便宜」一律維持一行，欄位再擠也不可以被折成上下兩個字 */
+    white-space: nowrap;
+    flex-shrink: 0;
     font-size: 10px;
     font-family: var(--font-sans);
     font-weight: 600;
@@ -236,7 +311,7 @@
   .put-status .price-box { align-items: flex-start; }
   .bidask { font-size: 10px; color: var(--text-muted); white-space: nowrap; }
 
-  .price { font-weight: 600; }
+  .price { font-weight: 600; white-space: nowrap; }
   .price.expensive { color: var(--red); }
   .price.cheap { color: var(--green); }
   .price.fair { color: var(--text-primary); }
@@ -303,6 +378,7 @@
 </head>
 <body>
 
+  <div class="sticky-top">
   <div class="ticker">
     <div>
       <div class="ticker-label">台指期 TX</div>
@@ -313,7 +389,10 @@
     </div>
     <div class="ticker-updated">
       <div><span class="dot"></span><span id="lastUpdated">--</span></div>
-      <button class="refresh-btn" id="refreshBtn" title="只重抓表格裡的值，不重新載入整頁">↻ 刷新</button>
+      <div>
+        <button class="refresh-btn" id="refreshBtn" title="只重抓表格裡的值，不重新載入整頁">↻ 刷新</button>
+        <button class="refresh-btn" id="resetPinsBtn" title="清空置頂區(所有到期別的都清)">重置全部</button>
+      </div>
     </div>
   </div>
 
@@ -324,6 +403,9 @@
     <div class="segment" id="expiryTypeSegment">
       <button data-type="month" class="active">月選</button>
       <button data-type="week">週選</button>
+    </div>
+    <div class="segment">
+      <button id="jumpAtmBtn" title="捲到價平那一列。價內最便宜的那一檔就在價平這列或緊鄰的上下列(Call 往上、Put 往下才是價內)">⤓ 跳到價平</button>
     </div>
     <span class="segment-label" style="margin-left:auto">顯示範圍</span>
     <!-- 價平上下各幾檔。「全部」送 100 = 後端的上限(serve_dashboard 會夾在 0~100) -->
@@ -344,18 +426,26 @@
     <span class="legend-info" id="expiryInfo"></span>
   </div>
 
-  <div class="chain-card">
+  <div class="pin-hint">📌 置頂：點每列最左邊的空格，該列會複製到表格最上面；再點一次圖釘取消。置頂區內按住上下拖曳可排序。</div>
+
+  <div class="chain-card chain-top">
     <div class="chain-header">
+      <div>置頂</div>
       <div class="call-time">成交</div>
       <div class="call-vol">量</div>
-      <div class="call-label">Call 合理價</div>
+      <div class="call-label" title="下方小字：到下個交易日同一時間，預估權利金少幾點(假設台指期與IV不變)">Call 合理價<br>隔日衰減</div>
       <div class="call-label" title="下方小字：委買 / 委賣">Call 市場價<br>委買/委賣</div>
       <div class="strike-label">履約價</div>
       <div class="put-label" title="下方小字：委買 / 委賣">Put 市場價<br>委買/委賣</div>
-      <div class="put-label">Put 合理價</div>
+      <div class="put-label" title="下方小字：到下個交易日同一時間，預估權利金少幾點(假設台指期與IV不變)">Put 合理價<br>隔日衰減</div>
       <div class="put-vol">量</div>
       <div class="put-time">成交</div>
     </div>
+    <div id="pinnedBody"></div>
+  </div>
+  </div><!-- /.sticky-top -->
+
+  <div class="chain-card chain-bottom">
     <div id="chainBody">
       <div class="loading-note">載入中…</div>
     </div>
@@ -414,7 +504,10 @@ async function fetchChainData(expiryType, expiryId) {
   // 實測 202610 Call 掛到 54500，預設只看得到 45000~48000
   // forceFresh：手動按刷新時請後端不要回20秒內的快取(後端仍有3秒下限)
   const fresh = forceFresh ? "&fresh=1" : "";
-  return await getJson(`/api/quotes?type=${expiryType}${q}&window=${currentWindow}${fresh}`, "抓報價資料");
+  // pin：置頂的履約價。台指期一動顯示範圍就跟著移，不另外要的話釘住的檔會掉出 rows
+  const pins = currentPins();
+  const pin = pins.length ? `&pin=${pins.join(",")}` : "";
+  return await getJson(`/api/quotes?type=${expiryType}${q}&window=${currentWindow}${pin}${fresh}`, "抓報價資料");
 }
 
 /* ---- 以下都是模擬資料產生器，之後接真後端可以整段刪除 ---- */
@@ -632,9 +725,13 @@ function createRow(strike) {
   el.className = "chain-row";
   el.dataset.strike = strike;
   el.innerHTML = `
+    <button class="pin-btn" type="button" title="置頂 / 取消置頂" aria-label="置頂"></button>
     <div class="cell-time call-time" data-role="callTime"></div>
     <div class="cell-vol call-vol" data-role="callVol"></div>
-    <div class="cell-fair call-fair" data-role="callFair"></div>
+    <div class="cell-fair call-fair">
+      <div data-role="callFair"></div>
+      <div class="decay" data-role="callDecay"></div>
+    </div>
     <div class="cell-status call-status">
       <span data-role="callBadge"></span>
       <span class="price-box">
@@ -650,7 +747,10 @@ function createRow(strike) {
       </span>
       <span data-role="putBadge"></span>
     </div>
-    <div class="cell-fair put-fair" data-role="putFair"></div>
+    <div class="cell-fair put-fair">
+      <div data-role="putFair"></div>
+      <div class="decay" data-role="putDecay"></div>
+    </div>
     <div class="cell-vol put-vol" data-role="putVol"></div>
     <div class="cell-time put-time" data-role="putTime"></div>
   `;
@@ -678,6 +778,45 @@ function sideTooltip(side) {
   return lines.join("\n");
 }
 
+/* 時間衰減那行小字。decayInfo = 後端的 meta.decay：估到哪一刻、那一刻叫什麼
+   (明日 / 週一 / 10/27 / 結算)。跨週末跟假日時不寫「明日」，免得被當成只算一天。 */
+let decayInfo = null;
+
+function fmtSigned(v) {
+  const r = Math.round(v * 10) / 10;
+  if (r === 0) return "0";
+  return (r > 0 ? "+" : "−") + Math.abs(r);
+}
+
+function renderDecay(el, side) {
+  if (!side || !decayInfo || side.decay === null || side.decay === undefined) {
+    el.textContent = "";
+    el.removeAttribute("title");
+    return;
+  }
+  const unreliable = side.reliable === false;
+  el.textContent = `${decayInfo.label} ${fmtSigned(side.decay)}`;
+  el.classList.toggle("dim", Boolean(side.stale) || unreliable);
+
+  const lost = -side.decay;
+  const shares = [];
+  if (side.price > 0) shares.push(`權利金的 ${(lost / side.price * 100).toFixed(1)}%`);
+  // 深價內的時間價值趨近 0，拿來當分母會除出沒意義的天文數字
+  if (side.timeValue >= 1) shares.push(`時間價值(${side.timeValue})的 ${(lost / side.timeValue * 100).toFixed(1)}%`);
+  const span = decayInfo.days > 1 ? `，跨 ${decayInfo.days} 個日曆天` : "";
+  const lines = [
+    decayInfo.settled
+      ? `${decayInfo.until} 結算價已定，時間價值歸零，只剩內含價值 ${side.nextPrice}`
+      : `預估 ${decayInfo.until} 的價格 ${side.nextPrice}`,
+    `現在 ${side.price} → ${side.nextPrice}（${fmtSigned(side.decay)} 點${span}）`,
+  ];
+  if (shares.length) lines.push("等於" + shares.join("、"));
+  lines.push("假設台指期與這一檔的IV都不變");
+  if (side.stale) lines.push("⚠ 報價超過10分鐘，反推的IV不準，這個數字參考價值低");
+  if (unreliable) lines.push("⚠ 這一檔的判斷本身不可信(深價外/基準是外插的)，衰減僅供參考");
+  el.title = lines.join("\n");
+}
+
 /* 單邊(Call或Put)的內容。side 可能是 null —— 真實資料裡某些履約價
    單邊完全沒報價、或反推不出IV，這時要留白，不能顯示成 0 或 undefined */
 function updateSide(el, side, prefix) {
@@ -688,6 +827,8 @@ function updateSide(el, side, prefix) {
 
   const timeEl = el.querySelector(`[data-role="${prefix}Time"]`);
   const bidAskEl = el.querySelector(`[data-role="${prefix}BidAsk"]`);
+
+  renderDecay(el.querySelector(`[data-role="${prefix}Decay"]`), side);
 
   if (!side) {
     bidAskEl.textContent = "";
@@ -735,6 +876,7 @@ function renderChain(data) {
   // 沒有的話才退回自己四捨五入 —— 那個做法在履約價間距不是100的到期別會抓錯行。
   const atmStrike = data.atmStrike ?? Math.round(data.underlying.price / 100) * 100;
   const body = document.getElementById("chainBody");
+  decayInfo = (data.meta && data.meta.decay) || null;
 
   // 第一次渲染時，把「載入中…」的佔位文字清掉
   if (Object.keys(rowElements).length === 0) {
@@ -763,7 +905,188 @@ function renderChain(data) {
     updateRowContent(el, row, row.strike === atmStrike);
     body.appendChild(el);
   });
+
+  lastChain = { data, atmStrike };
+  renderPinned();
 }
+
+/* =====================================================================
+   置頂區 — 點每列最左邊那一格，複製一列到最上面；表格本身的順序完全不動。
+   再點一次圖釘(或點兩下置頂區裡的列)＝取消；置頂區裡按住拖曳可以排序。
+   依到期別分開記(同一個履約價在不同到期別是不同合約)，存 localStorage。
+   ===================================================================== */
+const PIN_KEY = "txo_dashboard_pins";   // { 到期別代碼: [履約價, ...] }，由上到下
+let pinsByExpiry = (() => {
+  try {
+    return JSON.parse(localStorage.getItem(PIN_KEY)) || {};
+  } catch (e) {
+    return {};
+  }
+})();
+let pinnedElements = {};
+let lastChain = null;   // 最近一次畫出來的資料，置頂/取消時不用為了重畫再打一次API
+
+function currentPins() {
+  return pinsByExpiry[currentExpiryId] || [];
+}
+
+function setCurrentPins(pins) {
+  if (pins.length) pinsByExpiry[currentExpiryId] = pins;
+  else delete pinsByExpiry[currentExpiryId];
+  savePins();
+}
+
+function savePins() {
+  try { localStorage.setItem(PIN_KEY, JSON.stringify(pinsByExpiry)); } catch (e) { /* 存不了就只影響這次瀏覽 */ }
+}
+
+function renderPinned() {
+  const body = document.getElementById("pinnedBody");
+  const pins = currentPins();
+
+  Object.keys(pinnedElements).forEach((strikeStr) => {
+    if (!pins.includes(Number(strikeStr))) {
+      pinnedElements[strikeStr].remove();
+      delete pinnedElements[strikeStr];
+    }
+  });
+  Object.keys(rowElements).forEach((strikeStr) => {
+    rowElements[strikeStr].classList.toggle("is-pinned", pins.includes(Number(strikeStr)));
+  });
+  if (!lastChain) return;
+
+  // 後端的 pinnedRows 涵蓋掉出顯示範圍的檔；剛點兩下、還沒重抓的那一檔則從 rows 拿
+  const byStrike = new Map();
+  lastChain.data.rows.forEach((r) => byStrike.set(r.strike, r));
+  (lastChain.data.pinnedRows || []).forEach((r) => byStrike.set(r.strike, r));
+
+  pins.forEach((strike) => {
+    let el = pinnedElements[strike];
+    const isNew = !el;
+    if (isNew) {
+      el = createRow(strike);
+      pinnedElements[strike] = el;
+    }
+    // 兩邊都拿不到資料(該履約價已下市)就整列顯示「—」，不沿用舊的數字
+    const row = byStrike.get(strike) || { strike, call: null, put: null };
+    updateRowContent(el, row, strike === lastChain.atmStrike);
+    // 拖曳到一半剛好遇到自動更新時只換內容，不要把列搬回去
+    if (isNew || !drag) body.appendChild(el);
+  });
+}
+
+function togglePin(rowEl) {
+  const strike = Number(rowEl.dataset.strike);
+  const pins = currentPins();
+  if (pins.includes(strike)) setCurrentPins(pins.filter((s) => s !== strike));
+  else setCurrentPins([strike, ...pins]);
+  renderPinned();
+}
+
+/* 點圖釘那一格：置頂/取消。置頂區裡的列另外可以點兩下取消 ——
+   自己用 click 計時，不用 dblclick 事件，手機瀏覽器不一定會發 dblclick */
+const DOUBLE_TAP_MS = 400;
+let lastTap = { el: null, t: 0 };
+document.addEventListener("click", (e) => {
+  const rowEl = e.target.closest(".chain-row");
+  if (!rowEl) return;
+  // 拖曳放開時瀏覽器會緊接著補一個 click，那一下不算
+  if (e.timeStamp - dragEndedAt < 100) return;
+  if (e.target.closest(".pin-btn")) {
+    lastTap = { el: null, t: 0 };
+    togglePin(rowEl);
+    return;
+  }
+  if (rowEl.parentNode.id !== "pinnedBody") return;
+  if (lastTap.el === rowEl && e.timeStamp - lastTap.t < DOUBLE_TAP_MS) {
+    lastTap = { el: null, t: 0 };
+    togglePin(rowEl);
+  } else {
+    lastTap = { el: rowEl, t: e.timeStamp };
+  }
+});
+
+/* 拖曳排序(滑鼠、觸控共用 pointer events)。
+   滑鼠：按下去一拖就開始，不用等。
+   觸控：手指一滑就是捲動頁面，分不出來，所以要先按住 TOUCH_HOLD_MS 才進入拖曳；
+        在那之前手指動了就當成是要捲動，放掉不管。 */
+const TOUCH_HOLD_MS = 150;
+const PRESS_MOVE_TOLERANCE = 5;   // px，在這範圍內不算移動(滑鼠：還只是點一下；觸控：手抖)
+let press = null;   // 按下去、還沒開始拖 { el, x, y, timer }
+let drag = null;    // 拖曳中 { el }
+let dragEndedAt = -Infinity;
+
+function cancelPress() {
+  if (press) clearTimeout(press.timer);
+  press = null;
+}
+
+document.getElementById("pinnedBody").addEventListener("pointerdown", (e) => {
+  const el = e.target.closest(".chain-row");
+  if (!el || e.button !== 0 || !e.isPrimary || drag) return;
+  cancelPress();
+  press = {
+    el, x: e.clientX, y: e.clientY,
+    timer: e.pointerType === "mouse" ? null : setTimeout(() => startDrag(el), TOUCH_HOLD_MS),
+  };
+});
+
+function startDrag(el) {
+  cancelPress();
+  drag = { el };
+  el.classList.add("dragging");
+}
+
+document.addEventListener("pointermove", (e) => {
+  if (press && Math.hypot(e.clientX - press.x, e.clientY - press.y) > PRESS_MOVE_TOLERANCE) {
+    if (e.pointerType === "mouse") startDrag(press.el);
+    else cancelPress();
+  }
+  if (!drag) return;
+  // 滑鼠拖到視窗外才放開的話收不到 pointerup，回來時按鍵已經沒按著，就地結束
+  if (e.pointerType === "mouse" && e.buttons === 0) { endDrag(e); return; }
+  // 搬的是「被越過的鄰居」而不是拖著的那一列：把拖著的列拔掉再插回去，
+  // 瀏覽器會當成它離開過畫面，觸控的事件流就斷了
+  const el = drag.el;
+  const mid = (n) => { const r = n.getBoundingClientRect(); return r.top + r.height / 2; };
+  let next = el.nextElementSibling;
+  while (next && e.clientY > mid(next)) {
+    el.parentNode.insertBefore(next, el);
+    next = el.nextElementSibling;
+  }
+  let prev = el.previousElementSibling;
+  while (prev && e.clientY < mid(prev)) {
+    el.parentNode.insertBefore(prev, el.nextElementSibling);
+    prev = el.previousElementSibling;
+  }
+});
+
+function endDrag(e) {
+  cancelPress();
+  if (!drag) return;
+  drag.el.classList.remove("dragging");
+  drag = null;
+  dragEndedAt = e.timeStamp;
+  const order = [...document.getElementById("pinnedBody").children]
+    .map((el) => Number(el.dataset.strike));
+  setCurrentPins(order);
+}
+document.addEventListener("pointerup", endDrag);
+document.addEventListener("pointercancel", endDrag);
+
+// 觸控：拖曳中擋掉頁面捲動(要 passive:false 才擋得住)；按住時不要跳出系統選單
+document.addEventListener("touchmove", (e) => {
+  if (drag && e.cancelable) e.preventDefault();
+}, { passive: false });
+document.getElementById("pinnedBody").addEventListener("contextmenu", (e) => {
+  if (press || drag) e.preventDefault();
+});
+
+document.getElementById("resetPinsBtn").onclick = () => {
+  pinsByExpiry = {};
+  savePins();
+  renderPinned();
+};
 
 /* 判斷是拿什麼當基準算出來的，直接寫在畫面上。
    基準來源不同(資料庫5日均 / 偏斜曲線 / ATM單點)，同一個「偏貴」的可信度差很多。 */
@@ -819,10 +1142,18 @@ function renderMeta(meta) {
 
   const notes = ["※ 判斷僅供參考，不構成投資建議；淡色=報價超過10分鐘，? =偏差百分比失去意義"];
   if (meta.serverTime) notes.push(`後端更新於 ${meta.serverTime}`);
+  const decayNotes = [];
+  if (meta.decay) {
+    decayNotes.push(`※ 合理價下方的「${escapeHtml(meta.decay.label)} −x」＝台指期與IV都不變時，` +
+      `到 ${escapeHtml(meta.decay.until)}${meta.decay.settled ? "(已結算)" : ""} 預估權利金少幾點`);
+    if (meta.decay.calendarKnown === false) {
+      decayNotes.push(`<span class="warn">⚠ 交易行事曆缺資料，隔日只跳過了週六日，連假前的衰減會少算</span>`);
+    }
+  }
 
   warnEl.innerHTML = problems.map((s) => `<div>${s}</div>`).join("");
   notes.push("每 60 秒自動更新");
-  el.innerHTML = [...line2, notes.join("　")]
+  el.innerHTML = [...line2, notes.join("　"), ...decayNotes]
     .map((s) => `<div>${s}</div>`).join("");
 }
 
@@ -863,10 +1194,23 @@ document.querySelectorAll("#windowSegment button").forEach((btn) => {
     try { localStorage.setItem(WINDOW_KEY, String(currentWindow)); } catch (e) { /* 存不了就只影響這次瀏覽 */ }
     await loadChainData();
     // 「全部」會變成一百多列，停在原本的捲動位置會找不到價平在哪，直接捲過去
-    const atmRow = document.querySelector("#chainBody .atm");
-    if (atmRow) atmRow.scrollIntoView({ block: "center" });
+    scrollToAtm();
   };
 });
+
+/* 把價平那一列捲到「鎖定區下面那塊看得到的範圍」的正中間。
+   不能用 scrollIntoView({block:"center"}) —— 那是整個視窗的正中間，
+   鎖定區(加上置頂的列)常常超過半個視窗高，價平列會剛好被它蓋住。 */
+function scrollToAtm() {
+  const row = document.querySelector("#chainBody .atm");
+  if (!row) return;
+  const sticky = document.querySelector(".sticky-top");
+  const stickyH = getComputedStyle(sticky).position === "sticky" ? sticky.offsetHeight : 0;
+  const r = row.getBoundingClientRect();
+  const room = window.innerHeight - stickyH;
+  window.scrollTo(0, window.scrollY + r.top - stickyH - Math.max(0, (room - r.height) / 2));
+}
+document.getElementById("jumpAtmBtn").onclick = scrollToAtm;
 
 async function refreshAll() {
   try {

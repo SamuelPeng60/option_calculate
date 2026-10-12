@@ -25,16 +25,18 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, datetime, timedelta
 from typing import Literal, Optional
 
-from black76_iv import implied_vol, evaluate_option
+from black76_iv import black76_price, implied_vol, evaluate_option
 from iv_baseline import get_weekly_baseline_iv, LiveQuote
 from iv_skew import fit_skew_curve, quality_weight, SkewPoint, SkewCurve
 from db import OptionDB
+from trading_calendar import next_trading_day
 from taifex_fetch import (
     ContractMonth,
     RawLiveQuote,
+    SESSION_CLOSE_TIME,
     SETTLEMENT_TIME,
     fetch_live_quotes,
     quote_age_seconds,
@@ -111,10 +113,19 @@ class StrikeEval:
     bid: float = 0.0
     ask: float = 0.0
     tiny_fair: bool = False      # 合理價過小(深度價外)，百分比偏差失去意義
+    # 時間衰減：台指期跟這一檔自己的IV都不變，到 ChainAnalysis.decay_until 那一刻的理論價。
+    # 純粹給畫面看的估計值，不參與貴賤判斷。
+    next_price: float = 0.0
+    time_value: float = 0.0      # 現在的權利金裡，扣掉內含價值剩下的部分(會衰減的只有這塊)
 
     @property
     def stale(self) -> bool:
         return self.age_sec is not None and self.age_sec > STALE_AGE
+
+    @property
+    def decay(self) -> float:
+        """到 decay_until 為止權利金的變化(點)。負的 = 少掉這麼多"""
+        return self.next_price - self.market_price
 
 
 @dataclass
@@ -127,6 +138,12 @@ class ChainAnalysis:
     days_to_expiry: int
     time_to_expiry: float
     evals: list[StrikeEval] = field(default_factory=list)   # 依履約價排序
+
+    # 時間衰減估到哪一刻(下一個交易日的同一時間，見 next_session_same_time)
+    decay_from: Optional[datetime] = None
+    decay_until: Optional[datetime] = None
+    decay_settled: bool = False          # 那一刻結算價已定：剩下的只有內含價值
+    decay_calendar_known: bool = True    # False = 行事曆缺資料，只跳過了週六日
 
     # 基準IV相關
     baseline_source: str = ""
@@ -215,6 +232,24 @@ def _within_atm_range(strike: float, F: float, k_range: float) -> bool:
     return abs(math.log(strike / F)) <= k_range
 
 
+def next_session_same_time(now: datetime) -> tuple[datetime, bool]:
+    """
+    「下一個交易日的同一時間」是哪一刻。回傳 (那一刻, 行事曆資料是否完整)。
+
+    不是單純 +1 天：週五看到的「隔日」是下週一，中間三個日曆天的衰減都要算進去，
+    連假前更多。跳過哪些日子由 trading_calendar 決定。
+
+    夜盤跨過午夜之後(00:00–05:00)那段屬於「前一天晚上開的那一盤」：
+    週六凌晨 02:00 還在交易的是週五的夜盤，它的下一盤是週一晚上開的，
+    同一時間是「週二 02:00」，不是週一 02:00(那時候根本沒開盤)。
+    """
+    session_day = now.date()
+    if now.time() < SESSION_CLOSE_TIME["night"]:
+        session_day -= timedelta(days=1)
+    nxt, known = next_trading_day(session_day)
+    return now + (nxt - session_day), known
+
+
 def analyze_chain(
     contract: ContractMonth,
     right_type: Literal["C", "P"],
@@ -243,7 +278,8 @@ def analyze_chain(
 
     # T 算到結算價決定的那一刻(到期日 09:30)，不是「到期日整天」。
     # 理由跟實測數字見 taifex_fetch.years_to_settlement 上面那段。
-    T = years_to_settlement(contract.expiry_date)
+    now = datetime.now()
+    T = years_to_settlement(contract.expiry_date, now)
     if T <= 0:
         raise ContractSettledError(
             f"{contract.display_name} 的結算價已於 {contract.expiry_date} "
@@ -260,6 +296,12 @@ def analyze_chain(
         days_to_expiry=days_to_expiry,
         time_to_expiry=T,
     )
+
+    # 時間衰減要估到哪一刻，以及那時候還剩多少T(<=0 代表那時已經結算)
+    result.decay_from = now
+    result.decay_until, result.decay_calendar_known = next_session_same_time(now)
+    T_next = years_to_settlement(contract.expiry_date, result.decay_until)
+    result.decay_settled = T_next <= 0
 
     # 1) 報價鏈
     if quotes is None:
@@ -419,6 +461,13 @@ def analyze_chain(
         if out_of_range:
             verdict.reliable = False
 
+        # 時間衰減：F 跟這一檔自己反推的IV都不變，只把T換成「下個交易日同一時間」重新定價。
+        # 用自己的IV而不是基準IV —— 要回答的是「照市場現在的定價，放到那時候剩多少」。
+        # 不用 theta × 天數去估：快到期時衰減是加速的，線性估會低估。
+        # T_next <= 0 時 black76_price() 回傳內含價值，也就是時間價值全部歸零。
+        intrinsic = max(F - k, 0.0) if right_type == "C" else max(k - F, 0.0)
+        next_price = black76_price(F, k, T_next, R, iv_map[k], right_type)
+
         result.evals.append(StrikeEval(
             strike=k,
             market_price=q.last_price,
@@ -436,6 +485,8 @@ def analyze_chain(
             tiny_fair=tiny_fair,
             bid=q.bid,
             ask=q.ask,
+            next_price=next_price,
+            time_value=max(q.last_price - intrinsic, 0.0),
         ))
 
     return result
@@ -467,8 +518,6 @@ def pick_contract(
 if __name__ == "__main__":
     # 離線自我測試：用合成報價鏈直接跑 analyze_chain()(quotes 傳進去就不會連網)。
     # 管線跑的時候記得帶 PYTHONIOENCODING=utf-8，cp950 印不出 ✅。
-    from datetime import datetime, timedelta
-    from black76_iv import black76_price
     from db import IvHistoryRow
 
     F_TEST = 47300.0
@@ -555,5 +604,68 @@ if __name__ == "__main__":
     assert abs(res_g.baseline_iv_atm - TRUE_IV) < 0.01, \
         "陳舊的價平報價被拿去當基準了(BASELINE_MAX_AGE 比 STALE_AGE 寬)"
     print("✅ 基準跳過陳舊的價平報價\n")
+
+    print("=" * 72)
+    print("測試5：時間衰減 —— 估到下一個交易日的同一時間")
+    print("=" * 72)
+    # 5a) 「下一個交易日同一時間」本身(2026 年的行事曆在 trading_holidays.json 裡)
+    cases = [
+        (datetime(2026, 10, 13, 11, 0), datetime(2026, 10, 14, 11, 0), "一般平日 → 隔天"),
+        (datetime(2026, 10, 16, 11, 0), datetime(2026, 10, 19, 11, 0), "週五 → 下週一"),
+        (datetime(2026, 10, 8, 11, 0), datetime(2026, 10, 12, 11, 0), "國慶連假前 → 4天後"),
+        (datetime(2026, 10, 23, 22, 0), datetime(2026, 10, 27, 22, 0), "週五夜盤、週一補假 → 週二晚上"),
+        (datetime(2026, 10, 17, 2, 0), datetime(2026, 10, 20, 2, 0), "週六凌晨(週五夜盤) → 週二凌晨"),
+        (datetime(2026, 10, 14, 2, 0), datetime(2026, 10, 15, 2, 0), "週三凌晨(週二夜盤) → 週四凌晨"),
+        (datetime(2026, 2, 11, 11, 0), datetime(2026, 2, 23, 11, 0), "春節前最後交易日 → 12天後"),
+    ]
+    for now_, want, what in cases:
+        got, known = next_session_same_time(now_)
+        print(f"  {what}: {now_:%m/%d %H:%M} → {got:%m/%d %H:%M}")
+        assert got == want and known, (what, got, want, known)
+
+    # 5b) 每一檔的 next_price 就是「同F、同IV、T換成那一刻」重新定價
+    assert res.decay_until == next_session_same_time(res.decay_from)[0]
+    assert not res.decay_settled, "30天後到期，下個交易日不可能已經結算"
+    T_next_test = years_to_settlement(expiry, res.decay_until)
+    for e in res.evals:
+        want_px = black76_price(F_TEST, e.strike, T_next_test, R, e.implied_vol, "C")
+        assert abs(e.next_price - want_px) < 1e-9, e
+        assert e.time_value >= 0 and abs(e.decay - (e.next_price - e.market_price)) < 1e-12
+    atm5 = next(e for e in res.evals if e.strike == F_TEST)
+    span_days = (res.decay_until - res.decay_from).days
+    # 價平附近 price ∝ sqrt(T)，所以衰減量可以用閉式對一下
+    approx = atm5.market_price * (1 - math.sqrt(T_next_test / res.time_to_expiry))
+    print(f"  價平 {atm5.strike:.0f}: 現在 {atm5.market_price:.1f} → {res.decay_until:%m/%d %H:%M} "
+          f"{atm5.next_price:.1f}  衰減 {atm5.decay:+.1f} 點(跨 {span_days} 個日曆天，sqrt(T)近似 {-approx:+.1f})")
+    assert atm5.decay < 0, "價平的選擇權放一天不可能變貴"
+    assert abs(-atm5.decay - approx) < 0.02 * atm5.market_price, "跟 sqrt(T) 近似差太多"
+    # 衰減頂多把時間價值吃光。下限要用「折現後」的內含價值：歐式選擇權深價內的理論價
+    # 會略低於 F-K(差一個折現因子)，那幾檔的 time_value 是 0 但還是會動零點幾點。
+    # 容許 0.1：合成報價四捨五入到最小跳動
+    for e in res.evals:
+        floor_now = math.exp(-R * res.time_to_expiry) * max(F_TEST - e.strike, 0.0)
+        assert -e.decay <= e.market_price - floor_now + 0.1, e
+
+    # 5c) 下個交易日已經結算：剩下的只有內含價值，時間價值整個歸零
+    last_day = next_trading_day(date.today())[0]      # 讓到期日 = 下一個交易日
+    soon = ContractMonth(code="SOON", expiry_date=last_day,
+                         expiry_type="week", display_name="測試週選(明天結算)")
+    T_soon = years_to_settlement(last_day)
+    if T_soon > 0 and datetime.now().time() >= SETTLEMENT_TIME:
+        soon_quotes = [
+            RawLiveQuote(strike_price=k, right_type="C", expiry_type="week", expiry_date=last_day,
+                         bid=0.0, ask=0.0, volume=10, quote_time=hhmmss_ago(30), price_source="last",
+                         last_price=max(round(black76_price(F_TEST, k, T_soon, R, TRUE_IV, "C"), 1), 0.1))
+            for k in (F_TEST + i * 100 for i in range(-10, 11))
+        ]
+        res_soon = analyze_chain(soon, "C", "day", F_TEST, quotes=soon_quotes, use_skew_curve=False)
+        assert res_soon.decay_settled, "到期日 09:30 之後的同一時間，結算價已經定了"
+        for e in res_soon.evals:
+            assert abs(e.next_price - max(F_TEST - e.strike, 0.0)) < 1e-9, e
+            assert abs(-e.decay - e.time_value) < 0.11, e
+        print(f"  明天結算的合約: decay_settled=True，{len(res_soon.evals)} 檔的衰減都等於時間價值")
+    else:
+        print("  (現在早於 09:30，下個交易日同一時間還沒結算，5c 這次不適用)")
+    print("✅ 衰減估到下一個交易日同一時間，結算後只剩內含價值\n")
 
     print("全部通過")

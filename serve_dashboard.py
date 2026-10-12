@@ -9,8 +9,9 @@ serve_dashboard.py
     GET /                       → 送出 options_dashboard.html
     GET /api/expiries?type=month|week
                                 → [{id, label, expiryDate, days, type}, ...]
-    GET /api/quotes?type=..&expiry=..
-                                → {underlying:{...}, atmStrike, rows:[...], meta:{...}}
+    GET /api/quotes?type=..&expiry=..&window=..&pin=23000,23100
+                                → {underlying:{...}, atmStrike, meta:{...},
+                                   rows:[...], pinnedRows:[...]}
 
 計算完全走 pricing_service.analyze_chain()，跟 CLI(run_live_pipeline.py) 是同一套邏輯，
 所以網頁上看到的判斷跟指令列跑出來的會一致。
@@ -72,6 +73,7 @@ HTML_FILE = HERE / "options_dashboard.html"
 MONTHS_TTL = 300.0     # 掛牌到期別清單很少變，5分鐘撈一次就夠
 DEFAULT_QUOTES_TTL = 20.0
 MANUAL_REFRESH_MIN_TTL = 3.0   # 手動刷新時快取最短還是擋這麼久(秒)
+MAX_PINS = 50          # ?pin= 最多收幾個履約價(畫面的置頂區)
 
 
 # ---------------------------------------------------------------------------
@@ -88,7 +90,7 @@ class TTLCache:
     def __init__(self) -> None:
         self._data: dict[Any, tuple[float, Any]] = {}
         # 必須是RLock不是Lock：快取的計算函式裡面還會再查快取
-        # (quotes_payload 要先拿到期別清單)，用普通Lock會當場自己鎖死自己
+        # (analyze_quotes 要先拿到期別清單)，用普通Lock會當場自己鎖死自己
         self._lock = threading.RLock()
 
     def get_or_compute(self, key: Any, ttl: float, fn) -> Any:
@@ -198,6 +200,33 @@ def _side_payload(e) -> dict:
         "ageSec": e.age_sec,
         "stale": e.stale,                # 報價超過10分鐘，IV參考價值低
         "reliable": e.reliable,          # False=偏差百分比失去意義，不要當訊號看
+        # 時間衰減(估到 meta.decay.until 那一刻，F跟IV不變)。decay 負的=少掉這麼多點
+        "decay": round(e.decay, 1),
+        "nextPrice": round(e.next_price, 1),
+        "timeValue": round(e.time_value, 1),
+    }
+
+
+def _decay_meta(side: ChainAnalysis) -> dict:
+    """時間衰減估到哪一刻，以及畫面上那行小字要叫它什麼(明日 / 週一 / 10/27 / 結算)"""
+    until, start = side.decay_until, side.decay_from
+    days = (until.date() - start.date()).days
+    weekday = "週" + "一二三四五六日"[until.weekday()]
+    if side.decay_settled:
+        label = "結算"          # 那一刻結算價已定，剩下的只有內含價值
+    elif days == 1:
+        label = "明日"
+    elif days <= 6:
+        label = weekday         # 跨週末/假日：寫「明日」會被誤會成只算一天
+    else:
+        label = f"{until:%m/%d}"
+    return {
+        "label": label,
+        "until": f"{until:%m/%d}({weekday}) {until:%H:%M}",
+        "days": days,
+        "settled": side.decay_settled,
+        # False=行事曆沒有那一年的資料，只跳過了週六日，連假前會少算
+        "calendarKnown": side.decay_calendar_known,
     }
 
 
@@ -261,11 +290,42 @@ def _save_to_db(target: ContractMonth, session: str, F: float,
         CFG.db.save_live_quotes(rows)
 
 
-def quotes_payload(expiry_type: Literal["week", "month"],
-                   expiry_code: Optional[str],
-                   window: int) -> dict:
+def _rows(sides: dict[str, Optional[ChainAnalysis]], choose) -> list[dict]:
     """
-    組出前端要的一整包資料。
+    Call跟Put各用 choose(side) 挑出要的檔之後取聯集(兩邊的履約價通常一樣，
+    但流動性差的時候會有單邊算不出IV的情況)
+    """
+    call_map = {e.strike: e for e in (choose(sides["C"]) if sides["C"] else [])}
+    put_map = {e.strike: e for e in (choose(sides["P"]) if sides["P"] else [])}
+    return [
+        {
+            "strike": int(k) if float(k).is_integer() else k,
+            "call": _side_payload(call_map[k]) if k in call_map else None,
+            "put": _side_payload(put_map[k]) if k in put_map else None,
+        }
+        for k in sorted(set(call_map) | set(put_map))
+    ]
+
+
+def _parse_pins(raw: Optional[str]) -> set[float]:
+    """?pin=23000,23100 → {23000.0, 23100.0}，看不懂的直接略過"""
+    pins: set[float] = set()
+    for part in (raw or "").split(",")[:MAX_PINS]:
+        try:
+            pins.add(float(part))
+        except ValueError:
+            continue
+    return pins
+
+
+def analyze_quotes(expiry_type: Literal["week", "month"],
+                   expiry_code: Optional[str],
+                   ) -> tuple[dict[str, Optional[ChainAnalysis]], dict]:
+    """
+    抓報價 + 算出全鏈，回傳 (兩邊的 ChainAnalysis, 除了 rows 以外的整包資料)。
+
+    快取的是這一份(全鏈)，要顯示哪幾列由每次請求用 _rows() 另外切 ——
+    所以切換顯示範圍、置頂/取消置頂都不會多打期交所。
 
     Call跟Put是「同一次抓的報價、同一個F」算出來的 —— 分兩次抓的話，
     中間台指期跑掉幾點，兩邊的合理價就對不起來了。
@@ -304,24 +364,10 @@ def quotes_payload(expiry_type: Literal["week", "month"],
         except Exception as exc:      # 寫不進去不該讓畫面掛掉
             errors["db"] = f"{type(exc).__name__}: {exc}"
 
-    # 用ATM附近的視窗，Call跟Put各取一段之後取聯集(兩邊的履約價通常一樣，
-    # 但流動性差的時候會有單邊算不出IV的情況)
-    call_map = {e.strike: e for e in (sides["C"].window(window) if sides["C"] else [])}
-    put_map = {e.strike: e for e in (sides["P"].window(window) if sides["P"] else [])}
-
-    rows = [
-        {
-            "strike": int(k) if float(k).is_integer() else k,
-            "call": _side_payload(call_map[k]) if k in call_map else None,
-            "put": _side_payload(put_map[k]) if k in put_map else None,
-        }
-        for k in sorted(set(call_map) | set(put_map))
-    ]
-
     ref_side = sides["C"] or sides["P"]
     change_ref = u.ref_price if u.ref_price > 0 else u.price
 
-    return {
+    return sides, {
         "underlying": {
             "price": u.price,
             "prevClose": change_ref,     # 期交所給的參考價=前一交易日結算價
@@ -329,7 +375,6 @@ def quotes_payload(expiry_type: Literal["week", "month"],
             "priceSource": u.price_source,
         },
         "atmStrike": ref_side.atm_strike,
-        "rows": rows,
         "meta": {
             "session": session,
             "marketOpen": is_market_open(),
@@ -345,6 +390,7 @@ def quotes_payload(expiry_type: Literal["week", "month"],
             },
             "call": _chain_meta(sides["C"]),
             "put": _chain_meta(sides["P"]),
+            "decay": _decay_meta(ref_side),
             "filters": {"minVolume": CFG.min_volume, "maxAgeSec": CFG.max_age_sec},
             "serverTime": datetime.now().strftime("%H:%M:%S"),
             "errors": errors or None,
@@ -424,21 +470,30 @@ class Handler(BaseHTTPRequestHandler):
                 code = arg("expiry")
                 # 夾在合理範圍內：負數會讓 ChainAnalysis.window() 切出空清單
                 # (實測 ?window=-3 回傳0列，畫面空白且沒有任何錯誤訊息)，
-                # 過大的值則等於把幾百檔全塞給前端。順便也擋住「用任意window值
-                # 灌爆TTL快取、每個值各打一次期交所」這種繞過快取的用法。
+                # 過大的值則等於把幾百檔全塞給前端。
                 window = max(0, min(int(arg("window", str(CFG.window))), 100))
-                key = ("quotes", current_session(), etype, code, window,
+                pins = _parse_pins(arg("pin"))
+                # key 刻意不含 window / pin：快取的是全鏈，要哪幾列是事後切的。
+                # 放進 key 的話，每換一個值就各打一次期交所，等於繞過快取。
+                key = ("quotes", current_session(), etype, code,
                        CFG.min_volume, CFG.max_age_sec)
                 # 使用者手動按「刷新」(?fresh=1)：快取只擋 MANUAL_REFRESH_MIN_TTL 秒，
                 # 不然按了拿到的還是20秒內的同一份。留一個下限是為了連點不會連打期交所。
                 ttl = CFG.quotes_ttl
                 if arg("fresh") == "1":
                     ttl = min(ttl, MANUAL_REFRESH_MIN_TTL)
-                data = _cache.get_or_compute(
+                sides, data = _cache.get_or_compute(
                     key, ttl,
-                    lambda: quotes_payload(etype, code, window),
+                    lambda: analyze_quotes(etype, code),
                 )
-                self._send_json(data)
+                self._send_json({
+                    **data,
+                    "rows": _rows(sides, lambda s: s.window(window)),
+                    # 置頂的履約價不管在不在顯示範圍內都要給 —— 台指期一動，
+                    # ±10 的範圍跟著移，釘在邊緣的那幾檔會掉出 rows
+                    "pinnedRows": _rows(
+                        sides, lambda s: [e for e in s.evals if e.strike in pins]),
+                })
                 return
 
             if path == "/api/health":
